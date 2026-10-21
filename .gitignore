@@ -1,0 +1,7 @@
+out/
+__pycache__/
+*.log
+*.db
+*.gz
+.DS_Store
+.cpython-*
