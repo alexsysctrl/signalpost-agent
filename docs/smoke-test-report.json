@@ -1,0 +1,70 @@
+{
+  "run_directory": "out/smoke100d",
+  "reports": {
+    "batch": {
+      "inputs": 100,
+      "envelopes_written": 100,
+      "inputs_without_an_envelope": 0,
+      "contract_passed": true,
+      "models_used": [],
+      "wall_clock_s": 262.4,
+      "requests_total": 1058,
+      "per_company_ms": {
+        "median": 8710,
+        "p95": 45031,
+        "max": 72158
+      },
+      "third_party_cost_usd": 0.0,
+      "rate_policy_s": {
+        "per_host_minimum_gap_seconds": {
+          "data.brreg.no": 0.05,
+          "news.google.com": 0.3,
+          "www.linkedin.com": 0.35
+        },
+        "default_minimum_gap_seconds": 0.2,
+        "user_agent": "Mozilla/5.0 (compatible; SignalpostResearchAgent/1.0; +mailto:alex@sqopa.com)",
+        "timeouts": "8 s for candidate probes, 15-20 s for pages and registry reads, 4 s for the single retry",
+        "max_bytes_per_page": 600000,
+        "concurrency": "workers run concurrently; the gap below is enforced per host across them"
+      },
+      "budget_per_company_s": 90.0
+    },
+    "independent_recheck": {
+      "findings_re-derived": 149,
+      "published_under_the_wrong_company": 0,
+      "figures_that_did_not_re-derive": 1,
+      "what_each_was": [
+        "level 2: all distinctive name tokens on page: ['hordalaks']; registered locality on page: ['rong']; the quoted span is not in the current page; live source: sam"
+      ]
+    },
+    "external_evaluation": {
+      "entity_precision": 1.0,
+      "metric_precision": 0.9932885906040269,
+      "coverage": {
+        "any_external": 0.99,
+        "two_platforms": 0.17,
+        "workforce_jobs": 0.12,
+        "ratings_reviews": 0.0,
+        "buzz_engagement": 0.99,
+        "sentiment": 0.0
+      },
+      "qualification_passed": true
+    },
+    "source_rights": {
+      "policy_passed": true,
+      "acquisition_modes": {
+        "official_api": 110,
+        "permitted_public_page": 39
+      }
+    },
+    "profile_check": {
+      "profiles": 100,
+      "facts_checked": 2316,
+      "lines_without_a_claim_behind_them": 0,
+      "facts_without_a_source": 0,
+      "profiles_stating_unknowns": 100,
+      "page_provenance_covered": null
+    }
+  },
+  "missing": []
+}

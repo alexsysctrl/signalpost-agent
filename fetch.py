@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # A crawler that says what it is, and what happens when a site refuses to answer to that name.
 # Measured 2026-10-21 on auto2000.no: 403 to "signalpost-research-agent/1.0 (contact)" and 403 to
@@ -81,6 +82,61 @@ _CACHE: dict[str, Doc] = {}
 _DEAD: dict[str, float] = {}
 _HITS = {"cached": 0, "dead_host_skipped": 0}
 _STATE = threading.Lock()
+
+
+_ARCHIVE_DIR: Path | None = None
+_ARCHIVE_LOCK = threading.Lock()
+_archive_files = 0
+_archive_bytes = 0
+
+
+def enable_archiving(directory: str | Path | None) -> None:
+    """Write the bytes behind every page that answered, under a directory, keyed by their hash.
+
+    A published finding is only as good as the source it was read from, and a source on the open web moves.
+    Keeping the exact bytes means the claim can be re-derived later without the network, and a page that has
+    changed since is reported as changed instead of being mistaken for a wrong company.
+    """
+    global _ARCHIVE_DIR, _archive_files, _archive_bytes
+    _ARCHIVE_DIR = Path(directory) if directory else None
+    if _ARCHIVE_DIR is not None:
+        _ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        _archive_files = 0
+        _archive_bytes = 0
+
+
+def archive_path(sha256: str) -> Path | None:
+    if _ARCHIVE_DIR is None or not sha256:
+        return None
+    return _ARCHIVE_DIR / f"{sha256}.bin"
+
+
+def archived(sha256: str) -> bytes | None:
+    """The bytes this run read, if it read them and kept them."""
+    path = archive_path(sha256)
+    if path is None or not path.exists():
+        return None
+    return path.read_bytes()
+
+
+def archive_stats() -> dict:
+    with _ARCHIVE_LOCK:
+        return {"enabled": _ARCHIVE_DIR is not None, "files": _archive_files, "bytes": _archive_bytes}
+
+
+def _archive(doc: Doc) -> None:
+    if _ARCHIVE_DIR is None or doc.status != 200 or not doc.body:
+        return
+    path = archive_path(doc.sha256)
+    if path is None:
+        return
+    with _ARCHIVE_LOCK:
+        if path.exists():
+            return
+        path.write_bytes(doc.body)
+        global _archive_files, _archive_bytes
+        _archive_files += 1
+        _archive_bytes += len(doc.body)
 
 
 def enable_caching(enabled: bool = True) -> None:
@@ -357,6 +413,8 @@ def get(url: str, *, params: dict | None = None, **kw) -> Doc | None:
     doc = _raw_get(url, **kw)
     if doc is not None and not doc.requested_url:
         doc.requested_url = url
+    if doc is not None:
+        _archive(doc)
     return doc
 
 
@@ -500,4 +558,26 @@ if __name__ == "__main__":
     assert frozen.sha256 == "ab" * 32, "the evaluator's own content hash has to survive, not be recomputed"
     assert b"TEST AS" in frozen.body, "a JSON body from a snapshot must arrive as bytes the claims layer can quote"
     use_fetcher(None)
-    print("fetch self-test OK: 200 with span, 404 as an answer, injected snapshot honoured, sha256", d.sha256[:12])
+    # Archiving: the bytes behind a page are written once, keyed by hash, and come back identical.
+    import shutil
+    import tempfile
+
+    archive_dir = Path(tempfile.mkdtemp(prefix="fetch-archive-"))
+    try:
+        enable_archiving(archive_dir)
+        body = b"<html>archived evidence</html>"
+        sha = hashlib.sha256(body).hexdigest()
+        enable_archiving(None)  # the injected reader path must also be archived through get()
+        use_fetcher(lambda url, **kw: Doc(url=url, status=200, body=body, retrieved_at="2026-10-21T00:00:00Z", snapshot_sha256=sha))
+        enable_archiving(archive_dir)
+        kept = get("https://example.org/page")
+        assert kept is not None and archived(sha) == body, "the exact bytes read must be recoverable by hash"
+        assert archived("0" * 64) is None, "a hash this run never read must not invent evidence"
+        stats = archive_stats()
+        assert stats["files"] == 1 and stats["bytes"] == len(body), stats
+        use_fetcher(None)
+        enable_archiving(None)
+    finally:
+        shutil.rmtree(archive_dir, ignore_errors=True)
+
+    print("fetch self-test OK: 200 with span, 404 as an answer, injected snapshot honoured, evidence bytes kept and recovered by hash, sha256", d.sha256[:12])

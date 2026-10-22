@@ -19,6 +19,7 @@ Usage: python3 audit.py --observations out/run-1/observations.jsonl --out out/au
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import Counter
@@ -91,12 +92,47 @@ def job_links(html: str) -> int:
     return len(parser.found)
 
 
-def audit_page(obs: dict, bulk_row: dict | None) -> dict:
-    # Replay the original request, not just the URL that eventually answered.
+def replay(obs: dict) -> tuple[fetch.Doc | None, str]:
+    """Get the page this finding was made from: the bytes the run kept, or a fresh fetch if it kept none.
+
+    Re-deriving from the archived bytes is the stronger test — the claim is checked against exactly what was
+    read when it was made. A live fetch is still attempted afterwards, but a page that has moved since is a
+    statement about the web today, not evidence that the finding belonged to a different company.
+    """
     url = obs.get("requested_url") or obs["source_url"]
+    sha = str(obs.get("content_sha256") or "")
+    body = fetch.archived(sha) if sha else None
+    if body is not None:
+        digest = hashlib.sha256(body).hexdigest()
+        if digest != sha:
+            return None, f"evidence archive hash mismatch ({digest[:8]} for {sha[:8]})"
+        doc = fetch.Doc(url=url, status=200, body=body, retrieved_at=str(obs.get("retrieved_at") or ""), snapshot_sha256=sha)
+        doc.requested_url = url
+        return doc, "the bytes this run read"
     doc = fetch.get(url, timeout=15, max_bytes=600_000)
     if doc is None or doc.status != 200:
-        return {"exact_entity": False, "metric_correct": False, "method": "re-fetch", "note": f"source did not answer again (status {getattr(doc, 'status', 'none')})"}
+        return None, f"source did not answer again (status {getattr(doc, 'status', 'none')})"
+    return doc, "a fresh fetch (no archived bytes for this finding)"
+
+
+def live_still_there(obs: dict, archived_sha: str) -> str:
+    """Whether the source still answers and still says the same thing. Reported, never used to judge a claim."""
+    doc = fetch.get(obs.get("requested_url") or obs["source_url"], timeout=8, probe=True, max_bytes=600_000)
+    if doc is None:
+        return "the source did not answer again"
+    if doc.status != 200:
+        return f"the source now answers {doc.status}"
+    if doc.sha256 == archived_sha:
+        return "same bytes as recorded"
+    return "the page has changed since it was read"
+
+
+def audit_page(obs: dict, bulk_row: dict | None) -> dict:
+    url = obs.get("requested_url") or obs["source_url"]
+    doc, method = replay(obs)
+    kept_evidence = method == "the bytes this run read"
+    if doc is None:
+        return {"exact_entity": False, "metric_correct": False, "method": method, "note": method}
     text = doc.text()
     exact, reason = page_states_identity(text, obs["organisation_number"], obs.get("name", ""), bulk_row, url)
     metric = False
@@ -126,7 +162,12 @@ def audit_page(obs: dict, bulk_row: dict | None) -> dict:
     elif obs["signal_type"] in {"public_mention", "review", "public_post"}:
         metric = bool(obs.get("evidence_span")) and obs["evidence_span"][:60].lower() in text.lower()
         note += "; quoted span still present" if metric else "; the quoted span is not in the current page"
-    return {"exact_entity": exact, "metric_correct": metric, "method": "re-fetch and re-match", "note": note}
+    if kept_evidence:
+        # Recorded, not judged: whether the source still answers the same way today is a fact about the web,
+        # and it is the thing a refresh run is for.
+        status = live_still_there(obs, str(obs.get("content_sha256") or ""))
+        return {"exact_entity": exact, "metric_correct": metric, "method": method, "note": note + "; live source: " + status, "live_status": status}
+    return {"exact_entity": exact, "metric_correct": metric, "method": method, "note": note}
 
 
 def _reload_rating(doc) -> tuple[float, int] | None:
@@ -206,8 +247,13 @@ def main() -> None:
     parser.add_argument("--observations", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--limit", type=int, default=MAX_AUDIT, help="how many findings to re-check; the sample is spread across companies and signal types")
+    parser.add_argument("--evidence", help="directory of evidence bytes kept by the run (default: <observations>/../evidence)")
     args = parser.parse_args()
     rows = [json.loads(line) for line in Path(args.observations).read_text(encoding="utf-8").splitlines() if line.strip()]
+    evidence_dir = Path(args.evidence) if args.evidence else Path(args.observations).parent / "evidence"
+    if evidence_dir.is_dir():
+        fetch.enable_archiving(evidence_dir)
+        print(f"re-deriving from {evidence_dir} where the run kept the page")
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("ef", "../signalpost-starter-kit/src/norway_company_agent/external_footprint.py")
@@ -225,6 +271,8 @@ def main() -> None:
             result = audit_registry(obs)
         else:
             result = audit_page(obs, bulk_rows.get(obs["organisation_number"]))
+        if result.get("live_status"):
+            result["note"] = result["note"] + "; live source: " + result["live_status"]
         labels.append(
             {
                 "id": obs["id"],
@@ -245,9 +293,15 @@ def main() -> None:
     (out / "labels.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in labels), encoding="utf-8")
     wrong_entity = [r for r in labels if not r["exact_entity"]]
     wrong_metric = [r for r in labels if not r["metric_correct"]]
+    from_archive = [r for r in labels if str(r["audit_method"]).startswith("the bytes")]
+    still_there = [r for r in from_archive if "live source: same bytes" in r["audit_note"]]
     report = {
         "audited": len(labels),
         "publishable_input": len(publishable),
+        "re-derived_from_kept_evidence": len(from_archive),
+        "re-derived_from_a_fresh_fetch": len(labels) - len(from_archive),
+        "live_source_still_the_same": len(still_there),
+        "live_source_moved_or_unreachable": len(from_archive) - len(still_there),
         "wrong_entity": len(wrong_entity),
         "wrong_metric": len(wrong_metric),
         "by_type": dict(Counter(f"{r['platform']}/{r['signal_type']}" for r in labels)),
@@ -257,5 +311,60 @@ def main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def selftest() -> None:
+    """Prove the audit re-derives from kept evidence, and that a page which moved is reported as moved."""
+    import shutil
+    import tempfile
+
+    kept_page = (
+        '<html><body><h1>KITRON ASA</h1><p>orgnr 976605713</p>'
+        '<a href="https://www.linkedin.com/company/kitron-asa">LinkedIn</a></body></html>'
+    ).encode()
+    moved_page = b"<html><body><h1>Domain for sale</h1></body></html>"
+    sha = hashlib.sha256(kept_page).hexdigest()
+    observation = {
+        "id": "obx-selftest",
+        "organisation_number": "976605713",
+        "name": "KITRON ASA",
+        "platform": "company_site",
+        "signal_type": "profile_handle",
+        "value": "https://www.linkedin.com/company/kitron-asa",
+        "source_url": "https://kitron.no/",
+        "requested_url": "https://kitron.no/",
+        "content_sha256": sha,
+        "retrieved_at": "2026-10-21T00:00:00Z",
+    }
+
+    root = Path(tempfile.mkdtemp(prefix="audit-selftest-"))
+    try:
+        fetch.enable_archiving(root)
+        (root / f"{sha}.bin").write_bytes(kept_page)
+        fetch.use_fetcher(lambda url, **kw: fetch.Doc(url=url, status=200, body=moved_page, retrieved_at="2026-10-21T09:00:00Z"))
+
+        result = audit_page(observation, None)
+        assert result["exact_entity"], result  # the company is named on the page the claim came from
+        assert result["metric_correct"], result  # the handle is in the bytes that were read
+        assert "live source: the page has changed since it was read" in result["note"], result["note"]
+
+        wrong_handle = dict(observation, id="obx-wrong", value="https://www.linkedin.com/company/not-on-the-page")
+        bad = audit_page(wrong_handle, None)
+        assert bad["exact_entity"] and not bad["metric_correct"], bad  # a handle the evidence does not carry is caught
+
+        missing = dict(observation, content_sha256="0" * 64)
+        gone = audit_page(missing, None)
+        assert not gone["exact_entity"] and "fresh fetch" in gone["method"], gone  # with no kept bytes it falls back to the live page
+
+        fetch.use_fetcher(None)
+        fetch.enable_archiving(None)
+        print("audit self-test OK: claims are re-derived from the bytes that were read, a moved page is named as moved, a handle absent from the evidence is caught")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if len(sys.argv) == 1:
+        selftest()
+    else:
+        main()

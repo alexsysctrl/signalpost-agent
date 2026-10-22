@@ -12,8 +12,10 @@ Usage: python3 release_check.py [--root .]
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 # Things that belong to a private workspace. Each pattern is a category, not a one-off word: the point is
@@ -50,6 +52,33 @@ ALLOWED_IN_CODE_NAMES = {
 }
 
 
+def third_party_imports(root: Path) -> list[str]:
+    """Imports that are neither in the standard library nor a module of this repository.
+
+    The agent is stdlib-only by design, and that is a claim a reviewer can only take on trust unless
+    something checks it. A missing download or a stray dependency in a run harness looks identical to a
+    bug in the agent, so it is worth knowing which one you are looking at.
+    """
+    local = {path.stem for path in root.glob("*.py")}
+    extra = {"__future__"}
+    found: list[str] = []
+    for path in sorted(root.glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                names = [(node.module or "").split(".")[0]]
+            for module in names:
+                if module and module not in sys.stdlib_module_names and module not in local and module not in extra:
+                    found.append(f"{path.name}: {module}")
+    return sorted(set(found))
+
+
 def tracked_files(root: Path) -> list[str]:
     result = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True)
     if result.returncode != 0:
@@ -80,7 +109,12 @@ def scan(root: Path) -> dict:
                 match = re.search(pattern, line, re.I)
                 if match and not any(word in line for word in ALLOWED_IN_CODE_NAMES):
                     findings.setdefault(category, []).append(f"{relative}:{lineno}: {line.strip()[:110]}")
-    return {"files_checked": len(tracked_files(root)), "findings": findings, "allowed_examples": allowed_hits[:8]}
+    return {
+        "files_checked": len(tracked_files(root)),
+        "findings": findings,
+        "allowed_examples": allowed_hits[:8],
+        "third_party_imports": third_party_imports(root),
+    }
 
 
 if __name__ == "__main__":
@@ -97,10 +131,24 @@ if __name__ == "__main__":
                 print(f"    {hit}")
     else:
         print(f"release check clean over {report['files_checked']} tracked files")
+    if report["third_party_imports"]:
+        print("third-party imports found:")
+        for item in report["third_party_imports"]:
+            print(f"    {item}")
+    else:
+        print("no third-party imports: every module is either standard library or a file of this repository")
 
     # Self-test: each category is caught, and the allowed examples are not.
     for category, line in SAMPLES.items():
         assert re.search(CATEGORIES[category], line, re.I), (category, line)
     for allowed in ("python3 agent.py --orgs orgs.jsonl --out out/run-1 --budget 90",):
         assert not any(re.search(pattern, allowed, re.I) for pattern in CATEGORIES.values()), allowed
-    print("release_check self-test OK: private shorthand is caught, documented example paths are not")
+    probe = Path(".__import_probe__.py")
+    try:
+        probe.write_text("import requests\nimport json\n", encoding="utf-8")
+        caught = third_party_imports(Path("."))
+        assert any("__import_probe__" in item and "requests" in item for item in caught), caught
+        assert not any("json" in item for item in caught), caught
+    finally:
+        probe.unlink(missing_ok=True)
+    print("release_check self-test OK: private shorthand is caught, documented example paths are not, and an import outside the standard library is named")

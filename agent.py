@@ -21,6 +21,7 @@ Every output claim carries evidence ids; every absence is recorded as a state, n
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -108,6 +109,16 @@ def wikidata_profile(org: str) -> dict | None:
     return None
 
 
+def note_parked(res: dict, attempts: list[dict], route: str) -> None:
+    """A domain that resolves to a marketplace page is a checked candidate, and that has to be written down.
+
+    Recording it is the difference between "no website exists" and "this domain now belongs to someone else" —
+    the second is a fact about the company, and it is the one a reader would want.
+    """
+    for parked in res.get("parked") or []:
+        attempts.append({"route": route, "result": f"{parked['host']} {parked['reason']}"})
+
+
 def resolve_website(org: str, legal_name: str, bulk_row: dict, deadline: float | None = None) -> dict:
     """A website for this company, with the proof that it is this company's. Never a guess.
 
@@ -122,6 +133,7 @@ def resolve_website(org: str, legal_name: str, bulk_row: dict, deadline: float |
     if registered:
         host = discover.normalise_host(registered if "//" in registered else "https://" + registered)
         res = discover.verify_site(org, legal_name, [host], bulk_row, max_fetches=1, probe=True, deadline=deadline)
+        note_parked(res, attempts, "registered_domain")
         best = res.get("best")
         if best and best["level"] in (1, 2):
             return {**best, "availability": "available", "route": "registry_listed_verified"}
@@ -131,6 +143,7 @@ def resolve_website(org: str, legal_name: str, bulk_row: dict, deadline: float |
     email_hosts = discover.email_candidates(bulk_row.get("epostadresse") or "")
     if email_hosts:
         res = discover.verify_site(org, legal_name, email_hosts, bulk_row, max_fetches=2, probe=True, deadline=deadline)
+        note_parked(res, attempts, "registered_email_domain")
         best = res.get("best")
         if best and best["level"] in (1, 2):
             return {**best, "availability": "available", "route": "registered_email_domain_verified"}
@@ -146,6 +159,7 @@ def resolve_website(org: str, legal_name: str, bulk_row: dict, deadline: float |
     res = discover.verify_site(
         org, legal_name, discover.candidates(legal_name), bulk_row, max_fetches=2, probe=True, deadline=deadline
     )
+    note_parked(res, attempts, "name_generated_domain")
     best = res.get("best")
     if best and best["level"] in (1, 2):
         return {**best, "availability": "available", "route": "name_generated_verified", "attempts": attempts}
@@ -572,6 +586,7 @@ def write_run_report(out: Path, wanted: list[str], results: dict[str, dict], env
         "models_used": [],
         "source_hosts": dict(sorted(hosts.items(), key=lambda kv: -kv[1])[:15]),
         "http_cache": fetch.cache_stats(),
+        "evidence_archive": fetch.archive_stats(),
         "rate_policy": fetch.rate_policy(),
         "budget_per_company_s": budget_s,
         "website_availability": tally,
@@ -639,6 +654,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--budget", type=float, default=90.0, help="wall-clock seconds allowed per company before optional routes are skipped")
     parser.add_argument("--no-news", action="store_true")
+    parser.add_argument("--no-evidence-archive", action="store_true", help="do not keep the bytes behind published evidence")
     parser.add_argument("--resume", help="a run directory to continue from: organisations already there are re-emitted byte-for-byte with no request made")
     parser.add_argument(
         "--previous",
@@ -649,6 +665,10 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     fetch.enable_caching(True)
+    if not args.no_evidence_archive:
+        # The pages this run read are kept under the run directory, keyed by the hash every evidence record
+        # already carries. Without them a later check has to trust that the web still says the same thing.
+        fetch.enable_archiving(out / "evidence")
     if args.orgs:
         text = Path(args.orgs).read_text(encoding="utf-8")
         numbers = [m for m in re.findall(r"\d{9}", text)]
@@ -767,7 +787,35 @@ def main() -> None:
     for oid, reasons in rejected[:6]:
         print(f"  rejected {oid}: {reasons}")
     print(f"website resolution: {tally}")
-    write_run_report(out, wanted, results, envelopes, started, tally, len(resumed), args.resume, args.budget)
+    report = write_run_report(out, wanted, results, envelopes, started, tally, len(resumed), args.resume, args.budget)
+    check_evidence_archive(out, fetch.archive_stats().get("enabled") and report["requests_total"] > 0)
+
+
+def check_evidence_archive(out: Path, expected: bool) -> None:
+    """Prove the guarantee a published claim depends on: the bytes behind an evidence record can be recovered.
+
+    A resumed run makes no requests and keeps no new bytes, so it is exempt; a run that did read the web and
+    cannot show a single recoverable page has a broken archive, and that has to be said out loud rather than
+    discovered later by an audit that has to fall back on the live web."""
+    if not expected:
+        return
+    observations = out / "observations.jsonl"
+    if not observations.exists():
+        return
+    checked = 0
+    for line in observations.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        sha = str(record.get("content_sha256") or "")
+        if not sha:
+            continue
+        body = fetch.archived(sha)
+        if body is not None and hashlib.sha256(body).hexdigest() == sha:
+            checked += 1
+        if checked >= 3:
+            break
+    if checked == 0:
+        raise SystemExit("evidence archive is enabled but no kept page can be recovered by hash — the archive is broken")
+    print(f"evidence archive: {checked} of the sampled findings re-read from kept bytes ({fetch.archive_stats()['files']} files, {fetch.archive_stats()['bytes'] // 1024} KB)")
 
 
 if __name__ == "__main__":

@@ -352,6 +352,28 @@ def settled(org: str, legal_name: str, text: str, record: dict | None = None, ho
     return identity_proof(org, legal_name, text, record, host)
 
 
+# A company that sold its domain resolves to a marketplace page that mentions the company's old name.
+# That is not the company's website, and publishing it would be exactly the kind of fact that stops being
+# true the moment someone else buys the name. Measured on 2026-10-21: two of the six website changes
+# between two runs an hour apart were a company's domain landing on a domain marketplace.
+MARKETPLACE_HOSTS = {
+    "hugedomains.com", "aftermarket.eu", "aftermarket.com", "sedo.com", "dan.com", "domainmarket.com",
+    "dynadot.com", "parkingcrew.net", "squadhelp.com", "teaminternet.com", "park.io", "sedo.eu",
+}
+LISTING_MARKERS = (
+    "domain is for sale", "buy this domain", "make an offer", "this domain is available",
+    "domain for sale", "acquire this domain", "owner of this domain",
+)
+
+
+def is_domain_listing(host: str, text: str) -> bool:
+    bare = (host or "").casefold().removeprefix("www.")
+    if any(bare == m or bare.endswith("." + m) for m in MARKETPLACE_HOSTS):
+        return True
+    lowered = (text or "").casefold()
+    return sum(marker in lowered for marker in LISTING_MARKERS) >= 2
+
+
 def verify_site(
     org: str,
     legal_name: str,
@@ -388,6 +410,7 @@ def verify_site(
         alive = [h for h, ok in zip(hosts, pool.map(resolves, hosts)) if ok]
     tried = 0
     live: list[dict] = []
+    parked: list[dict] = []
     best: dict | None = None
     for host in alive:
         if deadline is not None and time.monotonic() > deadline:
@@ -415,6 +438,9 @@ def verify_site(
                     verdict = candidate
                 if verdict["publishable"]:
                     break
+        if is_domain_listing(normalise_host(first.url), text):
+            parked.append({"host": host, "url": first.url, "reason": "resolves to a domain-marketplace listing"})
+            continue
         entry = {
             "host": host,
             "url": docs[0].url,
@@ -434,7 +460,7 @@ def verify_site(
             best = entry
         if verdict["publishable"]:
             break
-    return {"tried": tried, "live": live, "best": best}
+    return {"tried": tried, "live": live, "parked": parked, "best": best}
 
 
 if __name__ == "__main__":
@@ -448,6 +474,9 @@ if __name__ == "__main__":
     joined = [s for s in s2 if "moeller" in s or "moller" in s]
     assert any("oe" in s for s in joined) and any("o" in s and "oe" not in s for s in joined), s2[:8]
     assert not any("&" in s for s in s2), s2[:8]
+    assert is_domain_listing("www.hugedomains.com", "<p>Sandnes Elektriske — the domain is available</p>")
+    assert is_domain_listing("example.no", "<h1>Example</h1><p>This domain is for sale. Make an offer.</p>")
+    assert not is_domain_listing("example.no", "<h1>Example AS</h1><p>Våre tjenester</p>")  # a real site that happens to be small
     assert org_numbers_in("Org.nr 976 605 713") == {"976605713"}, org_numbers_in("x")
     assert org_numbers_in("organisasjonsnummer: 810034882") == {"810034882"}
     assert org_numbers_in('"organizationNumber":"976605713"') == {"976605713"}

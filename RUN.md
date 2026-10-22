@@ -115,15 +115,31 @@ It re-derives published findings through different code paths, runs the competit
 external-footprint evaluator over them, checks the rights and rate policy of every finding, and reads every
 rendered profile back against the claims it says it came from. Its outputs land in `out/run-1/checks/`.
 
+## The 100-company smoke test
+
+The competition asks every entry to have run its agent on 100 companies and to publish that result. It is a
+short run and one command chain:
+
+```bash
+python3 agent.py --count 100 --out out/smoke-1 --workers 6 --budget 90
+./verify-run.sh out/smoke-1
+python3 smoke_report.py --run out/smoke-1 --output docs/smoke-test-report.json
+```
+
+`smoke_report.py` collects what the run already wrote — the batch report, the independent re-check, the
+competition's evaluator output, the rights check and the profile read-back — into one file, so the published
+artifact is the run's own output rather than a description of it. `docs/SMOKE-TEST.md` is the same thing in
+prose.
+
 ## Self-tests
 
 Every module carries its own self-test at the bottom of the file and can be run directly:
 
 ```bash
-for m in fetch identity claims external news official discover refresh research workspace bulk_index searchlayer summary render check_profile refresh_report connector_report ux_report release_check; do python3 $m.py || break; done
+for m in fetch identity claims external news official discover refresh research workspace bulk_index searchlayer summary render check_profile refresh_report connector_report ux_report smoke_report audit release_check; do python3 $m.py || break; done
 
 # then, over a real run:
-python3 agent.py --orgs orgs.jsonl --out out/run-1 --budget 90            # batch
+python3 agent.py --orgs orgs.jsonl --out out/run-1 --budget 90            # batch (keeps evidence bytes in out/run-1/evidence)
 python3 audit.py --observations out/run-1/observations.jsonl --out out/audit-1 --limit 400
 python3 evaluate_research_kit.py --envelopes out/run-1/envelopes.jsonl --output out/research-report.json
 python3 refresh_report.py --previous out/run-0/snapshots --current out/run-1 --rerun out/run-1b --output out/refresh-report.json
@@ -132,12 +148,13 @@ python3 check_profile.py --run out/run-1 --page out/profiles.html --output out/p
 python3 ux_report.py --envelopes out/run-1/envelopes.jsonl --page out/profiles.html --observations out/run-1/observations.jsonl --output out/ux-report.json
 ```
 
-Each of those is a check on something different: the audit re-fetches and re-derives published findings from
-independent code paths, `check_profile.py` reads the rendered summary back against the claims it says it came
+Each of those is a check on something different: the audit re-derives published findings from the evidence bytes
+the run kept, through different code paths, and reports separately whether each source still answers the same
+way on the live web, `check_profile.py` reads the rendered summary back against the claims it says it came
 from, `refresh_report.py` proves the diff behaves as a diff (deterministic, silent on an unchanged state,
 identical across two live runs), and `ux_report.py` scores the page against a checklist written in that file.
 
-`release_check.py` is the last one in that loop on purpose: it reads the files git would publish and fails
+`release_check.py` is the last one in that loop on purpose: it reads the files git would publish, fails
 if any of them carry a private network address, a scratch directory from an earlier run, a decision number
 from a private log, or notes-to-self phrasing. A released repository should read like a product, not like
 someone's working notes, and that is a checkable property rather than an intention.

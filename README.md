@@ -61,10 +61,13 @@ model would be a way to make mistakes about it, not a way to read it.
 
 ## Checking the work
 
-- `python3 audit.py --observations out/run-1/observations.jsonl --out out/audit-1` re-fetches each published
-  finding and re-derives its values independently: registry figures are re-read from the live API, page
-  findings are re-fetched and re-matched with a second parser, and job findings are counted again with a
-  different HTML parser than the one that made the claim.
+- `python3 audit.py --observations out/run-1/observations.jsonl --out out/audit-1` re-derives every published
+  finding from the bytes the run kept for it. A run writes each page it hashed into `out/run-1/evidence/`, keyed
+  by the SHA-256 its evidence records already carry, so the check runs against exactly what was read when the
+  claim was made — with a different parser (registry figures are re-read from the live API, page findings are
+  re-matched with `html.parser` rather than the regexes that published them, job links counted again
+  independently). The checker then re-asks the live source and records whether it still answers the same way;
+  a page that has moved is reported as moved, which is a statement about today, not evidence of a wrong company.
 - `python3 check_profile.py --run out/run-1 --page out/profiles.html` reads the rendered summary back and
   rejects any sentence without a claim behind it, any claim shown without evidence, and any fact on the page
   that no source block covers.
@@ -75,9 +78,15 @@ model would be a way to make mistakes about it, not a way to read it.
 
 ## Measured
 
-[`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) states what this agent was run on and what it returned: a
-1,000-company batch, the coverage it reached, the precision an independent re-check measured, and the cost.
-Every number in it is reproducible with the commands in [`RUN.md`](RUN.md).
+Two batches are published as reports rather than as claims:
+
+- [`docs/SMOKE-TEST.md`](docs/SMOKE-TEST.md) — 100 companies: the batch contract, what came back, what an
+  independent re-check measured, and what the batch cost. Its machine-readable twin is
+  [`docs/smoke-test-report.json`](docs/smoke-test-report.json), generated from that run's own output.
+- [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) — 1,000 companies: the same checks at scale, plus the
+  population ceilings and what each kind of information cannot reach.
+
+Every number in both is reproducible with the commands in [`RUN.md`](RUN.md).
 
 **See the output.** [`docs/example-profiles.html`](docs/example-profiles.html) is ten real profiles exactly as
 the agent renders them, produced by `render.py` from a run's own envelopes. Nothing in it is written by hand.

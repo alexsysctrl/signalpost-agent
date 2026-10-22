@@ -22,7 +22,10 @@ from typing import Any
 import discover
 
 SOCIAL_PATTERNS = {
-    "linkedin": re.compile(r"https?://(?:[a-z]{2,3}\.)?linkedin\.com/(?:company|in|school)/([^/?#\s\"']+)"),
+    # Only the company's own profile is that company's footprint. A person's profile link found on a page
+    # describes the person, and measured on 2026-10-21 it was the least durable thing on the page: four of the
+    # five findings that failed to re-confirm on a 100-company run were people links that had moved.
+    "linkedin": re.compile(r"https?://(?:[a-z]{2,3}\.)?linkedin\.com/company/([^/?#\s\"']+)"),
     "facebook": re.compile(r"https?://(?:www\.|m\.|nb\.)?facebook\.com/([^/?#\s\"']+)"),
     "instagram": re.compile(r"https?://(?:www\.)?instagram\.com/([^/?#\s\"']+)"),
     "youtube": re.compile(r"https?://(?:www\.)?youtube\.com/(?:channel|@|user|c)/([^/?#\s\"']+)"),
@@ -470,6 +473,10 @@ if __name__ == "__main__":
     assert ("youtube", "UCabcdefghijk") in handles, handles
     assert not any(p == "x" for p, _ in handles), handles  # twitter/intent is a widget, not a profile
     assert not any("proff-norge" in h for _, h in handles) or True  # kept: it is a real handle, filtered later
+
+    people = page + '\n      <a href="https://www.linkedin.com/in/thomas-gram-clark">Thomas</a>\n      <a href="https://linkedin.com/school/oslo-met">OsloMet</a>'
+    linkedin_handles = {h for p, h in {(o["platform"], o["handle"]) for o in extract_handles(people)} if p == "linkedin"}
+    assert "thomas-gram-clark" not in linkedin_handles and "oslo-met" not in linkedin_handles, linkedin_handles  # a person's profile and a school are not this company's footprint
 
     careers = """
       <a href="/jobb/ingenior">Ingeniør</a>
