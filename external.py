@@ -110,7 +110,14 @@ def host_of(url: str) -> str:
     return (urlparse(url).hostname or "").casefold().removeprefix("www.")
 
 
-def registry_observations(org: str, legal_name: str, fields: dict, doc: Any, account_years: list[str] | None = None) -> list[dict[str, Any]]:
+def registry_observations(
+    org: str,
+    legal_name: str,
+    fields: dict,
+    doc: Any,
+    account_years: list[str] | None = None,
+    accounts_doc: Any = None,
+) -> list[dict[str, Any]]:
     """What the register itself can prove as an external signal.
 
     Their strategy list names registry_workforce_snapshot as a valid move, and the platform "brreg" with
@@ -146,6 +153,11 @@ def registry_observations(org: str, legal_name: str, fields: dict, doc: Any, acc
                 "identity_proof": f"registry entity record for organisation number {org}",
             }
         )
+    # The count of filed years has to be evidenced by the accounts listing, not by whichever registry page
+    # happened to be at hand: caught on 2026-10-23 when the audit replayed this finding against the entity
+    # record and recounted zero years. A finding whose evidence points at the wrong payload is unverifiable.
+    if account_years and accounts_doc is None:
+        account_years = None
     if account_years:
         records.append(
             {
@@ -159,8 +171,8 @@ def registry_observations(org: str, legal_name: str, fields: dict, doc: Any, acc
                 "acquisition_mode": "official_api",
                 "rights_status": "approved",
                 "rights_note": "NLOD 2.0 open data from Regnskapsregisteret.",
-                "retrieved_at": doc.retrieved_at,
-                "content_sha256": doc.sha256,
+                "retrieved_at": accounts_doc.retrieved_at,
+                "content_sha256": accounts_doc.sha256,
                 "metrics": {"filed_account_years": len(account_years), "latest_year": account_years[0]},
                 "exact_entity": True,
                 "identity_proof": f"accounts register record for organisation number {org}",
@@ -277,6 +289,19 @@ def _jsonld_nodes(doc: Any) -> list[dict]:
     return out
 
 
+def _literal_json_span(text: str, key: str) -> str:
+    """The page's own text around a structured-data key, verbatim.
+
+    Re-serialising the parsed value would be an accurate summary of the page and not a piece of it. The
+    audit re-reads these findings from kept bytes, so the span has to be findable there.
+    """
+    for needle in (f'"{key}"', key):
+        i = text.find(needle)
+        if i >= 0:
+            return text[i:i + 600].strip()
+    return ""
+
+
 def jsonld_ratings(org: str, legal_name: str, doc: Any, identity_proof: str) -> list[dict[str, Any]]:
     """Ratings a company publishes about itself, on its own page.
 
@@ -297,7 +322,9 @@ def jsonld_ratings(org: str, legal_name: str, doc: Any, identity_proof: str) -> 
             continue
         if not (0 < value <= 5) or count <= 0:
             continue
-        span = json.dumps({"aggregateRating": rating}, ensure_ascii=False)[:500]
+        span = _literal_json_span(doc.text(), "aggregateRating")
+        if not span:
+            continue  # the figure parsed, but the page text does not carry it as a locatable fragment
         records.append(
             {
                 "id": f"obx-{org}-self-rating-{doc.sha256[:12]}",
@@ -314,7 +341,7 @@ def jsonld_ratings(org: str, legal_name: str, doc: Any, identity_proof: str) -> 
                 "rights_note": "Structured data published by the company on its own site.",
                 "retrieved_at": doc.retrieved_at,
                 "content_sha256": doc.sha256,
-                "evidence_span": f"aggregateRating published at {doc.url}: {span}",
+                "evidence_span": span,
                 "exact_entity": True,
                 "identity_proof": identity_proof,
             }
@@ -322,21 +349,64 @@ def jsonld_ratings(org: str, legal_name: str, doc: Any, identity_proof: str) -> 
     return records
 
 
-CAREER_WORDS = ("jobb", "jobber", "jobbe", "stillinger", "ledige stillinger", "ledige", "career", "careers", "karriere", "jobs", "recruit", "talent", "join us", "bli med", "ansett", "arbeid hos oss")
+# A job listing says a position is open. Norwegian premises and community pages use the friendly words
+# without meaning a position: measured 2026-10-23 on tindved.no, "Vi har ledige kontorplasser!" (we have
+# vacant offices to let) and "Bli med i fellesskapet!" (join the community) were both published as the
+# company advertising openings, and the page carried no job listing at all. Bare "ledige" and bare
+# "bli med" are the two traps, so they are not signals on their own any more.
+JOB_STEMS = ("stillinger", "stilling", "jobb", "jobber", "jobbe", "jobs", "karriere", "career", "careers",
+             "vacance", "vacancy", "vacancies", "rekrutter", "ansatte", "ansett", "stillingsannonse",
+             "ledige stillinger", "open positions", "openings", "work with us", "join our team")
+JOB_PATHS = ("/jobb", "/jobber", "/stillinger", "/ledige-stillinger", "/karriere", "/career", "/careers",
+             "/vacanc", "/recruit", "/jobs", "/work-with-us", "/join-us", "/jobbnorge")
+# Words that mean the page is about premises, membership or news rather than a position. Checked first.
+NOT_JOB = ("kontorplass", "kontorlokale", "lokaler", "lokalene", "utleie", "leieflater", "leilig",
+           "bolig", "leilighet", "visning", "parkering", "fellesskap", "medlemskap", "meld deg",
+           "nyhetsbrev", "event", "arrangement")
 # Short words match on a boundary: measured 2026-10-21 on 26 real company sites, plain substring matching
 # called a page about "the quiet landscape" a job listing.
-SHORT_CAREER = {"jobb", "jobber", "jobbe", "jobs", "ledige"}
+SHORT_STEMS = {"jobb", "jobber", "jobbe", "jobs"}
 
 
 def looks_like_career(text: str) -> bool:
+    """Does this link or heading say a position is open?"""
     lowered = (text or "").lower()
-    for word in CAREER_WORDS:
-        if word in SHORT_CAREER:
-            if re.search(rf"(?<![a-zæøå]){re.escape(word)}(?![a-zæøå])", lowered):
+    if any(word in lowered for word in NOT_JOB):
+        return False
+    for stem in JOB_STEMS:
+        if stem in SHORT_STEMS:
+            if re.search(rf"(?<![a-zæøå]){re.escape(stem)}(?![a-zæøå])", lowered):
                 return True
-        elif word in lowered:
+        elif stem in lowered:
             return True
-    return False
+    return any(path in lowered for path in JOB_PATHS)
+
+
+def _anchor_span(page_text: str, href: str) -> str:
+    """The page's own markup for this link, taken verbatim.
+
+    The claim is about a link the company published, so the evidence is the anchor itself: where it points
+    and the words around it, exactly as the page wrote them. Slicing guarantees it is a fragment of the
+    page rather than a sentence about it.
+    """
+    i = page_text.find(href)
+    if i < 0:
+        i = page_text.lower().find(href.lower())
+    if i < 0:
+        return ""
+    start = page_text.rfind("<a", max(0, i - 400), i)
+    if start < 0:
+        start = max(0, i - 60)
+    end = page_text.find("</a>", i)
+    end = end + 4 if end >= 0 else min(len(page_text), i + 400)
+    return page_text[start:end].strip()[:500]
+
+
+# An anchor tag, not any tag that starts with "a". The earlier pattern `<a[^>]+href=` also matched
+# <article … href=…> and <aside href=…>, and on 2026-10-23 that is how three company sites came to be
+# published with two job links when an independent parser (html.parser, which only sees real anchors) found
+# one each. A count that depends on which tags I mistook for links is not a count of anything.
+ANCHOR = re.compile(r'<a(?:\s[^>]*)?href=["\']([^"\'>#]{2,200})["\'][^>]*>([^<]{0,160})', re.I)
 
 
 def career_links(text: str, base_url: str) -> list[str]:
@@ -347,7 +417,7 @@ def career_links(text: str, base_url: str) -> list[str]:
     """
     from urllib.parse import urljoin
     out: list[str] = []
-    for href, label in re.findall(r'<a[^>]+href=["\']([^"\'>#]{2,200})["\'][^>]*>([^<]{0,120})', text or "", re.I):
+    for href, label in ANCHOR.findall(text or ""):
         if looks_like_career(href + " " + label):
             absolute = urljoin(base_url, href)
             if absolute.startswith("http") and absolute not in out:
@@ -365,7 +435,7 @@ def career_observations(org: str, legal_name: str, docs: list, identity_proof: s
     """
     records = []
     for page in docs:
-        hrefs = re.findall(r'<a[^>]+href=["\']([^"\'>#]{4,200})["\'][^>]*>([^<]{2,120})', page.text(), re.I)
+        hrefs = [(h, label) for h, label in ANCHOR.findall(page.text()) if h.strip()]
         hits = []
         for href, label in hrefs:
             if looks_like_career(href + " " + label):
@@ -377,6 +447,8 @@ def career_observations(org: str, legal_name: str, docs: list, identity_proof: s
         if len(distinct) < 2:
             continue
         sample = hits[0][1] or hits[0][0]
+        page_text = page.text()
+        anchor = _anchor_span(page_text, hits[0][0])
         records.append(
             {
                 "id": f"obx-{org}-jobs-{discover.registrable_domain(page.url)}-{page.sha256[:10]}",
@@ -393,7 +465,7 @@ def career_observations(org: str, legal_name: str, docs: list, identity_proof: s
                 "rights_note": "Links published by the company on its own site.",
                 "retrieved_at": page.retrieved_at,
                 "content_sha256": page.sha256,
-                "evidence_span": f"{page.url} links to job listings, e.g. \u201c{sample[:120]}\u201d",
+                "evidence_span": anchor or sample[:400],
                 "exact_entity": True,
                 "identity_proof": identity_proof,
             }
@@ -403,7 +475,12 @@ def career_observations(org: str, legal_name: str, docs: list, identity_proof: s
 
 
 def _span(text: str, terms: list[str], before: int = 100, after: int = 140) -> str:
-    """A literal fragment of the fetched page that contains one of the terms. Never a paraphrase."""
+    """A literal fragment of the fetched page that contains one of the terms. Never a paraphrase.
+
+    Verbatim, including the source's own line breaks. An earlier version collapsed whitespace, which made
+    the span a *description* of the page rather than a piece of it: the audit could not find the quoted
+    text in the bytes the run had kept, and a claim whose evidence cannot be located is unverifiable.
+    """
     lowered = text.lower()
     for term in terms:
         if not term:
@@ -411,7 +488,7 @@ def _span(text: str, terms: list[str], before: int = 100, after: int = 140) -> s
         i = lowered.find(term.lower())
         if i >= 0:
             start = max(0, i - before)
-            return re.sub(r"\s+", " ", text[start : i + len(term) + after]).strip()
+            return text[start : i + len(term) + after].strip()
     return ""
 
 
@@ -456,6 +533,20 @@ def news_observations(org: str, legal_name: str, articles: list[dict], _unused=N
             }
         )
     return records
+
+
+class TypeDoc:
+    """A page, for the self-test only."""
+
+    def __init__(self, body: str, url: str):
+        self.body = body.encode()
+        self.url = url
+        self.requested_url = url
+        self.sha256 = "0" * 64
+        self.retrieved_at = "2026-10-23T00:00:00Z"
+
+    def text(self):
+        return self.body.decode()
 
 
 if __name__ == "__main__":
@@ -523,12 +614,61 @@ if __name__ == "__main__":
     assert obs[0]["requested_url"] == "https://kitron.com/", obs[0]
     assert "job links" in job["value"] and "advertises openings" in job["value"], job["value"]
 
-    # Careers detection, on the shapes that were actually found on 26 real company sites.
+    # Careers detection, on the shapes that were actually found on real company sites — including the two
+    # that were wrongly published on 2026-10-23 and are the reason bare "ledige" and bare "bli med" are
+    # no longer signals.
     assert looks_like_career("https://slettaverft.no/jobbe-hos-oss Jobbe hos oss"), "a real jobs page must be recognised"
     assert looks_like_career("/karriere / Karriere"), "Norwegian sites use the English loan word too"
     assert looks_like_career("Ledige stillinger"), "the common Norwegian phrase must be recognised"
+    assert looks_like_career("https://example.no/stillinger/ingenior"), "a path named for positions is a jobs page"
     assert not looks_like_career("Les mer om jobbkulturen vår"), "a word containing jobb is not a job listing"
     assert not looks_like_career("https://example.no/priser og produkter"), "an ordinary product page is not hiring"
+    assert not looks_like_career("https://tindved.no/lokaler/ Vi har ledige kontorplasser!"), "vacant offices are premises, not positions"
+    assert not looks_like_career("https://tindved.no/naeringshagen/ Bli med i fellesskapet!"), "join the community is not a job"
+    assert not looks_like_career("Ledige næringslokaler til leie"), "commercial premises for rent is not hiring"
+
+    # A span has to be a piece of the page, not a sentence about it.
+    page_html = """<div class="ledige">
+    Vi har    ledige
+    kontorplasser i Næringshagen
+</div>"""
+    quoted = _span(page_html, ["ledige"])
+    assert quoted and quoted in page_html, "the quoted span must appear verbatim in the source"
+    anchor = _anchor_span('<p>x</p><a href="https://x.no/jobb/1">Stillinger</a><p>y</p>', "https://x.no/jobb/1")
+    assert anchor == '<a href="https://x.no/jobb/1">Stillinger</a>', anchor
+    # Only real anchors count as links. <article> and <aside> start with the same two letters.
+    markup = '<article class="card" href="/jobb/1">Ledige stillinger</article><aside href="/jobb/2">x</aside><a href="/jobb/3">Stillinger</a>'
+    found = {href for href, _ in ANCHOR.findall(markup)}
+    assert found == {"/jobb/3"}, found
+    counted = career_observations("976605713", "KITRON ASA", [TypeDoc(markup, "https://kitron.no/")], "organisation number printed on page")
+    assert not counted, "a page whose only job-looking href sits on an <article> is not a company hiring"
+    # A finding has to point at the payload it was made from. Caught on 2026-10-23: the filing-history
+    # observation named the accounts register but carried the entity record's hash, so the audit replayed it
+    # against the wrong bytes and recounted zero filed years.
+    class EntityDoc:
+        url = "https://data.brreg.no/enhetsregisteret/api/enheter/976605713"
+        requested_url = url
+        body = b'{"navn":"KITRON ASA"}'
+        retrieved_at = "2026-10-21T00:00:02Z"
+        sha256 = "2" * 64
+
+    class AccountsDoc:
+        url = "https://data.brreg.no/regnskapsregisteret/regnskap/976605713"
+        requested_url = url
+        body = b'[{"regnskapsperiode":{"fraDato":"2023-01-01"}}]'
+        retrieved_at = "2026-10-21T00:00:03Z"
+        sha256 = "3" * 64
+
+    registry_fields = {"employee_count": 850}
+    got = registry_observations("976605713", "KITRON ASA", registry_fields, EntityDoc(),
+                               ["2025", "2024", "2023"], accounts_doc=AccountsDoc())
+    filing = next(o for o in got if o["signal_type"] == "profile_metrics")
+    assert filing["content_sha256"] == AccountsDoc.sha256, "the claim carries the accounts payload, not the entity record"
+    assert "regnskap" in filing["source_url"], filing["source_url"]
+    assert filing["retrieved_at"] == AccountsDoc.retrieved_at, filing["retrieved_at"]
+    orphan = registry_observations("976605713", "KITRON ASA", registry_fields, EntityDoc(), ["2025"])
+    assert not any(o["signal_type"] == "profile_metrics" for o in orphan), "no accounts payload in hand, no filing-count claim"
+    assert any(o["signal_type"] == "workforce_snapshot" for o in got), "an employee count filed to the register is a dated workforce statement"
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("ef", "../signalpost-starter-kit/src/norway_company_agent/external_footprint.py")

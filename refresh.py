@@ -78,6 +78,32 @@ def _evidence_url(envelope: dict, claim: dict) -> str:
     return ""
 
 
+def same_value(left, right) -> bool:
+    """Are these two records the same fact, or a different fact wearing a different shape?
+
+    The register states some facts two ways: a purpose as one text with line breaks in the bulk file, and the
+    identical text as a list of lines in the API; an employee count as "14" in one and 14 in the other. A diff
+    that compares values exactly reports a hundred "changes" when two builds of this agent recorded the same
+    company differently — which is a claim about my code, not about Norway. Shape is normalised before anything
+    is called a change.
+    """
+    def norm(value):
+        if isinstance(value, (list, tuple)):
+            return " ".join(str(part).strip() for part in value if str(part).strip())
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, (int, float)):
+            return f"{value:g}"
+        return " ".join(str(value or "").split())
+
+    a, b = norm(left), norm(right)
+    if not a and not b:
+        return True  # two absences are the same state, and repeating one is not news
+    if not a or not b:
+        return False
+    return a.lower() == b.lower()
+
+
 def material_changes(previous: dict | None, current: dict) -> list[dict]:
     """Field-level differences between an earlier snapshot and this one."""
     if not previous:
@@ -127,10 +153,11 @@ def material_changes(previous: dict | None, current: dict) -> list[dict]:
 
 
 def _same(a, b) -> bool:
-    """Compare values the way a reader would: a URL with or without a trailing slash is the same site."""
+    """Compare values the way a reader would: a URL with or without a trailing slash is the same site, and the
+    same text or number in a different shape is the same fact."""
     if isinstance(a, str) and isinstance(b, str):
         return a.strip().rstrip("/").lower() == b.strip().rstrip("/").lower()
-    return a == b
+    return same_value(a, b)
 
 
 def save_snapshot(directory: str | Path, org: str, envelope: dict) -> None:
@@ -141,6 +168,23 @@ def save_snapshot(directory: str | Path, org: str, envelope: dict) -> None:
 
 
 if __name__ == "__main__":
+    shape_change = material_changes(
+        {
+            "claims": [
+                {"field": "registered_activity", "availability": "available", "value": ["Boligsameie."]},
+                {"field": "employees", "availability": "available", "value": "14"},
+            ]
+        },
+        {
+            "claims": [
+                {"field": "registered_activity", "availability": "available", "value": "Boligsameie."},
+                {"field": "employees", "availability": "available", "value": 14},
+            ],
+            "evidence": [],
+        },
+    )
+    assert not shape_change, f"a value re-spelled by a different source is not a change: {shape_change}"
+
     base = {
         "organisation_number": "1234567",
         "run": {"run_id": "r1", "completed_at": "2026-10-20T00:00:00Z"},

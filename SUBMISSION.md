@@ -6,7 +6,7 @@ Entry for the Signalpost competition. Submitted by Alex Sys, alex@sqopa.com.
 |---|---|
 | Agent name | `sqopa-signalpost` (the crawler user agent and the run report both carry this name) |
 | Repository | https://github.com/alexsysctrl/signalpost-agent |
-| Version 1 | tagged `v1` in this repository; the commit hash is given in the submission email |
+| Versions submitted | `v1` and `v2`, both tagged in this repository; the commit hash for the version being scored is given in the submission email |
 | Contact for results | alex@sqopa.com |
 
 ## One run command
@@ -62,10 +62,12 @@ registry read, one 4 s retry; 600 KB per page maximum.
 
 - **$0.00** to third parties.
 - Requests: about 10,200–11,300.
-- Wall clock: 39 minutes measured for 1,000 companies with 6 workers (median 9.3 s per company, 95th percentile
-  41.2 s, against a 90-second budget per company). With 1,100 companies expect ~43 minutes at the same worker
-  count; wall clock scales with workers, while per-host pressure stays bounded by the gaps above.
-- Disk: the run writes its outputs plus an evidence archive — measured 6,751 pages, 121 MB for 1,000 companies.
+- Wall clock: 39 to 55 minutes measured for 1,000 companies with 6 workers across four batches of the same
+  companies (median 8.9–9.4 s per company, 95th percentile 41–45 s, against a 90-second budget per company). The
+  request counts varied by 0.1% between those runs and the wall clock by 40%: the difference is upstream response
+  time, not work. With 1,100 companies expect the same shape at the same worker count; wall clock scales with
+  workers, while per-host pressure stays bounded by the gaps above.
+- Disk: the run writes its outputs plus an evidence archive — measured 6,768 pages, 123 MB for 1,000 companies.
 - Memory: about 60 MB resident during a batch (measured on a running batch).
 
 ## What this entry is careful about
@@ -78,6 +80,11 @@ registry read, one 4 s retry; 600 KB per page maximum.
   its footprint — a person's profile link found on a page is not published as the company's.
 - **Financial figures are the entity's own accounts.** Consolidated group accounts are published only when the
   company's own filing lacks that line, and they are labelled as consolidated group figures.
+- **A trading name is published only when it says something the legal name does not.** The register records a name
+  for each of a company's own subunits, and that is where a public brand is stated officially. Care-of lines
+  (`TO KANTEN C/O RUNE BIRKELAND`), responsible-person annotations (`SAREPTA AS V/ ADV. TOM STAVNES`) and branch
+  labels naming a town (`… AVD STAVANGER`) are not brands and are not published. This was decided by reading every
+  published example, not by sampling one: 34 candidates became 27.
 - **Claims are stored against the bytes they were read from.** Every evidence record carries a content hash and a
   retrieval time, and the run writes the page it hashed. Sources on the open web change — measured, 38% of
   re-checked live sources had changed or stopped answering within about an hour — so a claim is verifiable
@@ -91,7 +98,8 @@ registry read, one 4 s retry; 600 KB per page maximum.
 The population sets the ceiling, not the implementation. Within the frozen universe the register lists a website
 for 10.9% of organisations and an employee count for 14.5%; this agent reaches websites at roughly double the
 listed rate and employee counts at the register's own rate. Company self-published ratings are close to absent in
-Norway (3 companies in 1,000 measured). Hiring signals are sparse (14 companies in 1,000 list two or more
-openings on their own site; a national vacancy feed matched none of them). Sentiment is not attempted, because
+Norway (3 companies in 1,000 measured). Hiring signals are sparse (27 companies in 1,000 carry two or more
+job links on their own site; a national vacancy feed matched none of them). Dated activity is sparser still (4 of
+the 202 company sites a run kept publish machine-readable dates). Sentiment is not attempted, because
 no Norwegian company-text dataset with usable rights and independent labels was available — so no sentiment
 claim is published rather than a weak one.

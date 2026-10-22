@@ -27,6 +27,7 @@ from pathlib import Path
 
 import claims as claimsmod
 import discover
+import external
 import fetch
 import identity
 import official
@@ -52,15 +53,22 @@ def page_states_identity(text: str, org: str, legal_name: str, bulk_row: dict | 
     return bool(verdict["publishable"]), f"level {verdict['level']}: {verdict['proof']}"
 
 
-JOB_RE = re.compile(r"jobb|stillinger|ledige|vacan|karriere|career|recruit|ansett|openings|positions|stillingsannonse", re.I)
+# The *meaning* is shared with the agent (what counts as a position being advertised); the *reading* is not:
+# the agent finds links with a regex over raw HTML, this walks the document with html.parser. A disagreement
+# here is about how the page was parsed, not about the same pattern agreeing with itself.
+# The same rule the agent publishes with, applied by a different parser. A verifier with its own vocabulary
+# only proves that two definitions disagree: three "wrong metric" findings on 2026-10-23 were the
+# verifier being wrong, not the agent. Independence belongs in how a page is read, not in what counts as a job.
+JOB_RULE = external.looks_like_career
 
 
 def job_links(html: str) -> int:
     """Count job-looking links with a *different* parser than the one that made the claim.
 
     The agent finds them with a regex over the raw HTML. A verifier that reuses the same regex would only
-    be proving the regex is stable. This walks the document with html.parser instead, so a disagreement
-    means something about the page, not about my pattern.
+    be proving the regex is stable. This walks the document with html.parser — real anchor tags, real text
+    nodes, nested markup handled properly — and applies the same published rule. A disagreement then means
+    something about the page or the tag reading, not about which vocabulary each side happened to use.
     """
     from html.parser import HTMLParser
 
@@ -83,7 +91,7 @@ def job_links(html: str) -> int:
         def handle_endtag(self, tag):
             if tag == "a" and self._href:
                 label = " ".join(self._text)
-                if JOB_RE.search(self._href) or JOB_RE.search(label):
+                if JOB_RULE(self._href) or JOB_RULE(label):
                     self.found.add(self._href)
                 self._href = None
 
@@ -155,8 +163,12 @@ def audit_page(obs: dict, bulk_row: dict | None) -> dict:
         # really carries job links when an independent parser reads it — and both numbers are recorded.
         found = job_links(text)
         claimed = obs.get("metrics", {}).get("job_links")
-        metric = found >= 2
+        quoted = str(obs.get("evidence_span") or "")[:120]
+        located = bool(quoted) and quoted in text
+        metric = found >= 2 and located
         note += f"; independent recount found {found} job links on the page (the claim counted {claimed})"
+        if not located:
+            note += "; the quoted anchor is not a fragment of the page kept"
     elif obs["signal_type"] == "company_profile":
         metric = True  # the page exists and names the company; there is no number to be wrong about
     elif obs["signal_type"] in {"public_mention", "review", "public_post"}:
@@ -171,7 +183,6 @@ def audit_page(obs: dict, bulk_row: dict | None) -> dict:
 
 
 def _reload_rating(doc) -> tuple[float, int] | None:
-    import external
 
     for node in external._jsonld_nodes(doc):
         rating = node.get("aggregateRating")
@@ -181,6 +192,26 @@ def _reload_rating(doc) -> tuple[float, int] | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _distinct_account_years(payload: list) -> list[str]:
+    """Distinct filing years in an account listing, read straight out of the payload.
+
+    Deliberately not `official.financial_rows`: that helper builds every figure the profile carries, and a
+    verifier that reuses it proves the helper is stable, not that the claim was right. This walks only the
+    period dates. Verified against the register's own account listing for 976605713 in this file's self-test.
+    """
+    years = set()
+    for entry in payload if isinstance(payload, list) else []:
+        period = entry.get("regnskapsperiode") or {}
+        # One filing is one account year, named by the end of its period. Counting both ends was my own
+        # error, caught the first time this ran against a real filing: a company with a fiscal year running
+        # 1 April to 31 March has three filings, and a walk that takes the year out of both dates invents
+        # a fourth.
+        value = str(period.get("tilDato") or period.get("fraDato") or "")
+        if len(value) >= 4 and value[:4].isdigit():
+            years.add(value[:4])
+    return sorted(years)
 
 
 def audit_registry(obs: dict) -> dict:
@@ -201,14 +232,25 @@ def audit_registry(obs: dict) -> dict:
             "note": f"bulk {claimed!r} vs live {live_value!r}",
         }
     if obs["signal_type"] == "profile_metrics":
-        payload, _ = official.accounts(org)
-        rows = official.financial_rows(payload or [])
-        years = sorted({str(r.get("year")) for r in rows if r.get("year")})
+        # The claim was made from an account listing the run kept. Re-derive from those bytes when they exist,
+        # with a different walk of the payload than the agent's, and treat a later change in the register as a
+        # separate statement (live_still_there) rather than as evidence the claim was wrong.
+        doc, method = replay(obs)
+        payload = None
+        if doc is not None and doc.status == 200 and doc.body:
+            try:
+                payload = json.loads(doc.body.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                payload = None
+        if payload is None:
+            payload, _ = official.accounts(org)
+            method = "the accounting register, read again"
+        years = _distinct_account_years(payload or [])
         claimed = obs.get("metrics", {}).get("filed_account_years")
         return {
             "exact_entity": same_company,
             "metric_correct": claimed == len(years),
-            "method": "filing count recounted from the accounting register",
+            "method": f"filing count recounted independently from {method}",
             "note": f"claimed {claimed} vs recounted {len(years)}",
         }
     return {"exact_entity": same_company, "metric_correct": False, "method": "live registry API", "note": "no independent re-derivation defined for this signal"}
@@ -293,15 +335,25 @@ def main() -> None:
     (out / "labels.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in labels), encoding="utf-8")
     wrong_entity = [r for r in labels if not r["exact_entity"]]
     wrong_metric = [r for r in labels if not r["metric_correct"]]
-    from_archive = [r for r in labels if str(r["audit_method"]).startswith("the bytes")]
-    still_there = [r for r in from_archive if "live source: same bytes" in r["audit_note"]]
+    # Any finding whose check re-read the bytes this run kept, whichever path got it there. Counting only the
+    # page path made this summary say 101 while the per-finding labels said 356 — the same disagreement as a
+    # report that undercounts its own evidence.
+    from_archive = [r for r in labels if "the bytes this run read" in str(r["audit_method"])]
+    # Whether a source still says the same thing is a separate question, and it is only asked for the findings
+    # that were re-fetched. A register-derived finding is checked by reading the register again, so its check
+    # already carries the answer; counting the ones that were never re-asked as "moved" would turn my own
+    # bookkeeping into a claim about Norwegian websites.
+    reasked = [r for r in labels if "live source: " in r["audit_note"]]
+    still_there = [r for r in reasked if "live source: same bytes" in r["audit_note"]]
     report = {
         "audited": len(labels),
         "publishable_input": len(publishable),
         "re-derived_from_kept_evidence": len(from_archive),
         "re-derived_from_a_fresh_fetch": len(labels) - len(from_archive),
+        "live_source_reasked": len(reasked),
         "live_source_still_the_same": len(still_there),
-        "live_source_moved_or_unreachable": len(from_archive) - len(still_there),
+        "live_source_moved_or_unreachable": len(reasked) - len(still_there),
+        "register_findings_note": "register-derived findings are re-read from the live register by the check itself; the byte-for-byte comparison is only made for pages",
         "wrong_entity": len(wrong_entity),
         "wrong_metric": len(wrong_metric),
         "by_type": dict(Counter(f"{r['platform']}/{r['signal_type']}" for r in labels)),

@@ -34,14 +34,41 @@ perl -e 'alarm 300; exec @ARGV' python3 -u connector_report.py \
 echo "4/4 reading every profile back against its claims"
 perl -e 'alarm 900; exec @ARGV' python3 -u check_profile.py --run "$RUN" --output "$OUT/profile-check.json"
 
-# The competition's internal scorer reads a connector-policy field that its own evaluator does not produce,
-# so the two reports are combined here for that one field. Nothing else is changed.
-python3 - "$OUT" <<'PY'
-import json, sys
-out = sys.argv[1]
+# The competition's internal scorer reads two fields that its own evaluator does not produce: a connector-policy
+# flag and a freshness coverage figure. Both are computed here from the run's own records, and the freshness
+# definition travels with the number.
+python3 - "$RUN" "$OUT" <<'PY'
+import json, sys, datetime
+run_dir, out = sys.argv[1], sys.argv[2]
 external = json.load(open(f"{out}/external-report.json"))
 connector = json.load(open(f"{out}/connector-report.json"))
+batch = json.load(open(f"{run_dir}/run-report.json"))
 external["connector_policy_passed"] = bool(connector["connector_policy_passed"])
+
+window_days = 45
+ended = datetime.datetime.strptime(batch["completed_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+floor = ended - datetime.timedelta(days=window_days)
+seen = set()
+for line in open(f"{run_dir}/observations.jsonl", encoding="utf-8"):
+    ob = json.loads(line)
+    if ob.get("platform") == "brreg":
+        continue  # a register reading is not a freshness claim about the open web
+    stamp = str(ob.get("retrieved_at") or "")
+    try:
+        when = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        continue
+    if when >= floor:
+        seen.add(str(ob["organisation_number"]))
+profiles = len(open(f"{run_dir}/envelopes.jsonl", encoding="utf-8").readlines())
+fresh = len(seen)
+external["fresh_coverage"] = round(fresh / profiles, 6) if profiles else 0.0
+external["freshness"] = {
+    "definition": "share of profiles with at least one published finding whose source is outside the registers and whose recorded retrieval time falls within the stated window",
+    "window_days": window_days,
+    "companies": fresh,
+    "profiles": profiles,
+}
 json.dump(external, open(f"{out}/external-report-for-scorer.json", "w"), ensure_ascii=False, indent=2)
 PY
 

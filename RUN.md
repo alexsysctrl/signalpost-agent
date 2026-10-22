@@ -136,6 +136,7 @@ prose.
 Every module carries its own self-test at the bottom of the file and can be run directly:
 
 ```bash
+python3 agent.py --self-test
 for m in fetch identity claims external news official discover refresh research workspace bulk_index searchlayer summary render check_profile refresh_report connector_report ux_report smoke_report audit release_check; do python3 $m.py || break; done
 
 # then, over a real run:

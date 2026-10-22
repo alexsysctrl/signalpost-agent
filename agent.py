@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -231,20 +232,12 @@ BULK_CLAIMS = (
 COLUMN_FOR_FIELD = {target: source for source, target in identity.BULK_FIELDS.items()}
 
 
-def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = True, budget_s: float = 90.0) -> dict:
-    """One company, end to end, inside a wall-clock budget.
+def _claim_identity(record, org: str, fields: dict, bulk_row: dict) -> None:
+    """The facts the frozen register file already supports, claimed the same way on every path.
 
-    The budget is not a convenience: the official run has a fixed time and resource allowance per batch and
-    a missing result is not scored. Registry calls come first because they are the required envelope; the
-    optional routes (generated domains, Wikidata, news) are only entered while there is time left, and a
-    route skipped for budget is recorded as skipped rather than silently absent.
+    Split out on 2026-10-23 so that a run which fails part way through can still publish the identity it
+    proved. build_record and partial_result share this one definition; there is no second version.
     """
-    started = time.monotonic()
-    deadline = started + budget_s
-    fetch.reset_counts()
-    record = claimsmod.Record(org)
-    observations: list[dict] = []
-
     def span_for(field_key: str) -> str:
         column = COLUMN_FOR_FIELD.get(field_key, field_key)
         raw = str(bulk_row.get(column) or "").strip()
@@ -269,6 +262,23 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
         else:
             record.record_not_available(claim_name, f"registry bulk column {column}")
 
+
+def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = True, budget_s: float = 90.0) -> dict:
+    """One company, end to end, inside a wall-clock budget.
+
+    The budget is not a convenience: the official run has a fixed time and resource allowance per batch and
+    a missing result is not scored. Registry calls come first because they are the required envelope; the
+    optional routes (generated domains, Wikidata, news) are only entered while there is time left, and a
+    route skipped for budget is recorded as skipped rather than silently absent.
+    """
+    started = time.monotonic()
+    deadline = started + budget_s
+    fetch.reset_counts()
+    record = claimsmod.Record(org)
+    observations: list[dict] = []
+
+    _claim_identity(record, org, fields, bulk_row)
+
     live, live_doc = identity.live_fields(org)
     if live_doc is not None:
         if live:
@@ -283,8 +293,8 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
                 value = live.get(live_field)
                 if value in (None, "", [], {}):
                     continue
-                if fields.get(COLUMN_FOR_FIELD.get(live_field, live_field)) == value:
-                    continue  # already published from the bulk row; do not double-claim the same fact
+                if refresh.same_value(fields.get(live_field), value):
+                    continue  # the same fact in a different shape is still the same fact
                 record.claim(claim_name, value, doc=live_doc, span=str(value)[:300], source_class="official_registry")
         else:
             record.record_failed("registry_live", f"entity API returned HTTP {getattr(live_doc, 'status', '?')}")
@@ -321,17 +331,69 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
                         note=note,
                     )
         else:
-            record.record(name, module.get("state", "not_available"), module.get("why", "no record"))
+            state = module.get("state", "not_available")
+            why = module.get("why", "no record")
+            if state == "failed":
+                # A register that did not answer is not a company that has nothing. Recorded as a failure so
+                # the run report shows the difference and a degraded batch is visible in it.
+                record.record_failed(name, why)
+            else:
+                record.record(name, state, why)
 
     site = resolve_website(org, fields.get("legal_name") or "", bulk_row, deadline=deadline)
     # Distinct years, not records: the register can hold a group account and a company account for the same
     # year under one journal number, and calling that two filings would be a claim the data does not support.
     account_years = sorted({str(row.get("year")) for row in (modules.get("financials", {}).get("value") or []) if row.get("year")}, reverse=True)
     subunits = modules.get("locations", {}).get("value") or []
+    # A registered subunit carries its own name, and for many companies that name is what the sign, the
+    # booking page or the shop front says. The brief asks for legal identity *and public brand*; this is the
+    # part of that which the register itself states, so it is published from the register rather than guessed
+    # from a page title. Names that only repeat the entity's own name with a place attached are not brands.
+    parent_places = [x for x in (fields.get("business_municipality"), fields.get("business_postal_town"), fields.get("postal_town")) if x]
+    brands = [
+        {"name": row["name"], "organisation_number": row.get("organisation_number", "")}
+        for row in subunits
+        # A branch name is not a new brand because it names its own town: "INATUR NORGE AS AVD TRONDHEIM" is
+        # the entity's name plus a place. Each subunit's own address is therefore part of what gets stripped.
+        if row.get("name") and identity.is_distinct_trading_name(
+            fields.get("legal_name"), row["name"], localities=tuple(parent_places + [str(row.get("address") or "")])
+        )
+    ]
+    if brands:
+        shown_brands = {"count": len(brands), "sample": brands[:12]}
+        record.claim(
+            "trading_names",
+            shown_brands,
+            doc=(modules.get("locations") or {}).get("doc") or live_doc,
+            span="; ".join(str(b["name"]) for b in brands[:6])[:400],
+            source_class="official_registry",
+            note="registered as subunits of this organisation number",
+        )
+    elif subunits:
+        record.record(
+            "trading_names",
+            "not_available",
+            "no registered subunit name says anything the entity's own registered name does not already say",
+            "this entity's registered subunits (underenheter API)",
+        )
+    else:
+        record.record(
+            "trading_names",
+            "not_available",
+            "the register lists no subunits under this entity",
+            "underenheter API for this organisation number",
+        )
     registry_fields = dict(fields)
     if subunits:
         registry_fields["subunit_count"] = len(subunits)
-    observations += external.registry_observations(org, fields.get("legal_name") or "", registry_fields, live_doc, account_years)
+    observations += external.registry_observations(
+        org,
+        fields.get("legal_name") or "",
+        registry_fields,
+        live_doc,
+        account_years,
+        accounts_doc=(modules.get("financials") or {}).get("doc"),
+    )
     if site["availability"] == "available":
         record.claim(
             "official_website",
@@ -480,6 +542,27 @@ def profile_from_record(org: str, fields: dict, record: claimsmod.Record, site: 
     return profile
 
 
+def partial_result(org: str, fields: dict, bulk_row: dict, exc: Exception) -> dict:
+    """An input still gets a terminal envelope when the thing that failed was this program.
+
+    Measured 2026-10-23: two of 1,000 organisations died inside a UnicodeEncodeError while a Norwegian domain
+    name was being turned into an HTTP request, and the batch returned 998 envelopes for 1,000 inputs. One
+    envelope per number is the contract; the identity facts the register file supports are published, the
+    sources that were never reached are stated as never reached, and the error is written where someone will
+    read it instead of only on the console.
+    """
+    record = claimsmod.Record(org)
+    _claim_identity(record, org, fields, bulk_row)
+    for name in ("registry_live", "financials", "roles", "locations", "group", "official_website", "trading_names"):
+        record.record_not_available(name, "not attempted: this profile stopped on an internal error")
+    record.errors.append({"field": "_run", "error": f"{type(exc).__name__}: {exc}"})
+    site = {"availability": "not_available", "proof": "not attempted (internal error)", "attempts": []}
+    profile = profile_from_record(org, fields, record, site, bulk_row)
+    profile["run_metrics"] = {"requests": record.requests, "dns_lookups": 0, "bytes": 0, "latencies_ms": []}
+    return {"record": record, "envelope": record.envelope(), "profile": profile, "observations": [],
+            "site": site, "counts": fetch.counts()}
+
+
 def not_found_result(org: str) -> dict:
     """An input always gets a terminal envelope, even when the registry does not know it.
 
@@ -532,6 +615,29 @@ def not_found_result(org: str) -> dict:
     return {"envelope": record.envelope(), "observations": [], "profile": profile, "site": {"availability": "not_found"}}
 
 
+def selftest() -> None:
+    """The identity and shape rules the pipeline depends on, checked without a network."""
+    assert refresh.same_value("first line\nsecond line", ["first line", "second line"]), "the same text must not be claimed twice"
+    assert refresh.same_value("14", 14), "an employee count is one fact whether it is a string or a number"
+    assert not refresh.same_value("Tømrervirksomhet", ["Tømrervirksomhet", "Og montasje"]), "a longer statement is new information"
+    print("agent self-test OK: a fact in two shapes is claimed once, a longer statement is new information")
+
+
+def _source_failures(envelopes: list[dict]) -> dict[str, int]:
+    """How many times an official or external source failed to answer, by field.
+
+    The point of the number is honesty about a batch: if the accounts register was timing out, the profiles that
+    say "no filed accounts" must not be read as a population that files nothing.
+    """
+    counts: dict[str, int] = {}
+    for envelope in envelopes:
+        for claim in envelope.get("claims") or []:
+            if claim.get("availability") == "failed":
+                field = str(claim.get("field"))
+                counts[field] = counts.get(field, 0) + 1
+    return counts
+
+
 def write_run_report(out: Path, wanted: list[str], results: dict[str, dict], envelopes: list[dict], started: float, tally: dict, resumed_count: int = 0, resumed_from: str | None = None, budget_s: float = 0.0) -> dict:
     """The machine-readable run report the submission contract asks for: runtime, request count, cost.
 
@@ -541,6 +647,12 @@ def write_run_report(out: Path, wanted: list[str], results: dict[str, dict], env
 
     runtime = [e["operations"]["runtime_ms"] for e in envelopes]
     requests = [e["operations"]["requests"] for e in envelopes]
+    # Requests a resumed run did not make must not appear as work this run did.
+    carried_over = sum(
+        results[org]["envelope"]["operations"]["requests"]
+        for org in wanted
+        if org in results and results[org].get("resumed")
+    )
 
     def pct(values, q):
         if not values:
@@ -570,6 +682,9 @@ def write_run_report(out: Path, wanted: list[str], results: dict[str, dict], env
             "requests": {"median": pct(requests, 0.5), "p95": pct(requests, 0.95), "max": max(requests) if requests else None},
         },
         "requests_total": sum(requests),
+        "requests_this_run": sum(requests) - carried_over,
+        "requests_carried_over": carried_over,
+        "source_failures": _source_failures(envelopes),
         "emitted_envelopes": len(envelopes),
         "profiles_fetched_this_run": len(envelopes) - resumed_count,
         "carried_over_from_previous_run": resumed_count,
@@ -686,7 +801,7 @@ def main() -> None:
         previous = load_previous_run(Path(args.resume))
         for org in wanted:
             if org in previous:
-                results[org] = previous[org]
+                results[org] = dict(previous[org], resumed=True)
                 resumed.append(org)
         if resumed:
             print(f"resuming {len(resumed)} of {len(wanted)} organisations from {args.resume} — no request will be made for them")
@@ -705,7 +820,7 @@ def main() -> None:
         try:
             return org, build_record(org, fields, bulk_row, with_news=not args.no_news, budget_s=args.budget)
         except Exception as exc:
-            return org, {"error": f"{type(exc).__name__}: {exc}"}
+            return org, partial_result(org, fields, bulk_row, exc)
 
     for org in resumed:
         availability = results[org]["site"]["availability"]
@@ -745,6 +860,10 @@ def main() -> None:
     changed_companies = 0
     for org in wanted:
         if org not in results:
+            continue
+        if results[org].get("resumed"):
+            # A carried-over envelope is the answer the earlier run published. Re-diffing it here would rewrite
+            # that run's result with today's inputs, and then "resumed" would quietly mean "recomputed".
             continue
         envelope = results[org]["envelope"]
         prior = refresh.load_previous(args.previous, org)
@@ -788,7 +907,10 @@ def main() -> None:
         print(f"  rejected {oid}: {reasons}")
     print(f"website resolution: {tally}")
     report = write_run_report(out, wanted, results, envelopes, started, tally, len(resumed), args.resume, args.budget)
-    check_evidence_archive(out, fetch.archive_stats().get("enabled") and report["requests_total"] > 0)
+    fetched = report["requests_this_run"] > 0
+    check_evidence_archive(out, fetch.archive_stats().get("enabled") and fetched)
+    if not fetched and report["requests_carried_over"]:
+        print(f"no page was read by this run: every profile was carried over, and the bytes behind them belong to {args.resume}")
 
 
 def check_evidence_archive(out: Path, expected: bool) -> None:
@@ -819,4 +941,7 @@ def check_evidence_archive(out: Path, expected: bool) -> None:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        selftest()
+        raise SystemExit(0)
     main()

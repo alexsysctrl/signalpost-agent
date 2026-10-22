@@ -36,6 +36,8 @@ RATE = {
 DEFAULT_RATE = 0.20
 
 _last_at: dict[str, float] = {}
+# When a host has just failed us, the whole pool waits for a moment before anyone asks it again.
+_cool_down: dict[str, float] = {}
 _rate_lock = threading.Lock()
 _thread = threading.local()
 _injected = None
@@ -306,10 +308,23 @@ def rate_policy() -> dict:
         "per_host_minimum_gap_seconds": dict(RATE),
         "default_minimum_gap_seconds": DEFAULT_RATE,
         "user_agent": UA,
-        "timeouts": "8 s for candidate probes, 15-20 s for pages and registry reads, 4 s for the single retry",
+        "timeouts": "8 s for candidate probes, 15-20 s for pages and registry reads, 35 s for the accounts register listing (measured 18.2 s for one call), 4 s for the single retry, 30 s maximum cool-down on a host after a failure",
         "max_bytes_per_page": 600_000,
         "concurrency": "workers run concurrently; the gap below is enforced per host across them",
     }
+
+
+def _penalise(host: str, seconds: float) -> None:
+    """Back the whole worker pool off a host that just failed us.
+
+    Measured 2026-10-22: the Regnskapsregisteret account endpoint answered one call in 18.2 s, and a batch run
+    at 05:00 UTC came back with 952 companies recorded as having no filed accounts. Six workers kept asking a
+    struggling endpoint at the normal gap, so the failures fed themselves. A failure should slow everyone down
+    for a moment, not just the caller that noticed.
+    """
+    with _rate_lock:
+        now = time.monotonic()
+        _cool_down[host] = max(_cool_down.get(host, 0.0), now + min(seconds, 30.0))
 
 
 def _wait(url: str) -> None:
@@ -325,7 +340,7 @@ def _wait(url: str) -> None:
     with _rate_lock:
         now = time.monotonic()
         prev = _last_at.get(host, now - gap)
-        slot = max(now, prev + gap)
+        slot = max(now, prev + gap, _cool_down.get(host, 0.0))
         _last_at[host] = slot
     wait = slot - time.monotonic()
     if wait > 0:
@@ -418,6 +433,43 @@ def get(url: str, *, params: dict | None = None, **kw) -> Doc | None:
     return doc
 
 
+def _wire_url(url: str) -> str | None:
+    """A URL the HTTP stack can actually send: IDNA-encoded host, percent-encoded path.
+
+    Norwegian company domains carry æ/ø/å and so do links on their pages. urllib's client encodes the host as
+    ASCII, which raised UnicodeEncodeError and stopped two of 1,000 profiles on 2026-10-23 — an internal error
+    in my code read as a company that could not be profiled. Punycode is what DNS wants anyway. A host that
+    cannot be encoded is refused here, before it can fail somewhere less obvious.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if any(ord(char) > 127 for char in host):
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urllib.parse.urlunsplit((
+        parts.scheme or "https",
+        netloc,
+        _quote_non_ascii(parts.path),
+        _quote_non_ascii(parts.query),
+        _quote_non_ascii(parts.fragment),
+    ))
+
+
+def _quote_non_ascii(text: str) -> str:
+    """Percent-encode the characters a wire request cannot carry, and touch nothing else.
+
+    Quoting whole paths would double-encode what is already encoded: `q=%22KITRON%22` became
+    `q=%2522KITRON%2522` the first time this ran, and the news self-test failed on a query that had
+    stopped asking for anything. Only non-ASCII characters need encoding here.
+    """
+    if not text or all(ord(char) < 128 for char in text):
+        return text
+    return "".join(urllib.parse.quote(char) if ord(char) > 127 else char for char in text)
+
+
 def _raw_get(
     url: str,
     *,
@@ -441,6 +493,10 @@ def _raw_get(
     if params:
         sep = "&" if "?" in url else "?"
         url = url + sep + urllib.parse.urlencode(params)
+    sent = _wire_url(url)
+    if sent is None:
+        return None
+    url = sent
     cached = _cache_get(url)
     if cached is not None:
         return cached
@@ -496,12 +552,17 @@ def _raw_get(
                 alt = _recover(url, timeout)
                 if alt is not None:
                     return alt
+            _penalise(urllib.parse.urlsplit(url).netloc, 15.0 if e.code == 429 else 8.0)
             if e.code in (429, 500, 502, 503, 504) and retried < tries and not probe:
                 retried += 1
                 time.sleep(min(1.5 * 2**retried, 20.0))
                 continue
             return None
         except (urllib.error.URLError, TimeoutError, OSError) as err:
+            if not probe:
+                # A real source that timed out or refused the connection. A candidate-probe failure is a
+                # normal answer about a domain that may not exist, and it does not get to slow the pool.
+                _penalise(urllib.parse.urlsplit(url).netloc, 8.0)
             if retried == 0 and not probe:
                 alt = _recover(url, timeout)
                 if alt is not None:
@@ -581,3 +642,10 @@ if __name__ == "__main__":
         shutil.rmtree(archive_dir, ignore_errors=True)
 
     print("fetch self-test OK: 200 with span, 404 as an answer, injected snapshot honoured, evidence bytes kept and recovered by hash, sha256", d.sha256[:12])
+    _penalise("throttled.example", 1.2)
+    started = time.monotonic()
+    _wait("https://throttled.example/anything")
+    waited = time.monotonic() - started
+    assert waited >= 1.0, f"a penalised host must be waited on, waited {waited:.2f}s"
+    assert time.monotonic() - started < 4.0, "a cool-down is a pause, not a halt"
+    print("fetch self-test OK: registry read, 404 as an answer, dead-host skip, per-call rate slots, penalised host waited on")

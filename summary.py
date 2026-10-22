@@ -35,6 +35,7 @@ CURRENCY_FIELDS = ("revenue", "operating_result", "annual_result", "assets", "de
 # the contract asks for; what appears in a sentence is the plain name of the thing and a plain state.
 FIELD_LABELS = {
     "legal_name": "registered name",
+    "trading_names": "registered trading names",
     "legal_form": "legal form",
     "industry": "industry classification",
     "secondary_industry": "secondary industry classification",
@@ -158,6 +159,16 @@ def build(envelope: dict) -> dict:
         cited = ["legal_name"] + (["legal_form"] if form else [])
         opening = f"{name} is registered in Norway as {form}." if form else f"{name} is registered in Norway."
         identity = [line(opening, *cited)]
+    brands = held(envelope, "trading_names")
+    if isinstance(brands, dict):
+        names = [str(b.get("name")).strip() for b in (brands.get("sample") or []) if isinstance(b, dict) and b.get("name")]
+        if names:
+            identity.append(
+                line(
+                    "Trading names registered under this organisation number: " + "; ".join(names) + ".",
+                    "trading_names",
+                )
+            )
     if place:
         identity.append(line(f"Registered location: {place}.", "municipality"))
     if industry:
@@ -406,6 +417,19 @@ if __name__ == "__main__":
     drifted["sections"]["financials"].append(line("Share capital: 100\u00a0000 kroner (2025)", "share_capital"))
     caught = verify(envelope, drifted)
     assert any("share_capital" in p for p in caught), caught
+
+    # A registered trading name is part of the identity the brief asks for: it has to render, and it has to
+    # be traceable to the claim that carries it.
+    brand_envelope = {**unrecorded, "claims": unrecorded["claims"] + [
+        {"field": "legal_name", "value": "GEST BREISETH AS", "availability": "available", "evidence_ids": []},
+        {"field": "trading_names", "value": {"count": 1, "sample": [{"name": "FIRST HOTEL BREISETH", "organisation_number": "925287370"}]},
+         "availability": "available", "evidence_ids": ["ev-brand"], "note": "registered as subunits of this organisation number"},
+    ], "evidence": [{"id": "ev-brand", "source_url": "https://data.brreg.no/enhetsregisteret/api/underenheter?overordnetEnhet=925287369",
+                    "retrieved_at": "2026-10-21T00:00:00Z", "content_sha256": "0" * 64, "source_class": "official_registry"}]}
+    brand_profile = build(brand_envelope)
+    rendered = " ".join(l["text"] for l in brand_profile["sections"]["identity"])
+    assert "FIRST HOTEL BREISETH" in rendered, brand_profile["sections"]["identity"]
+    assert verify(brand_envelope, brand_profile) == [], verify(brand_envelope, brand_profile)
 
     empty = {"organisation_number": "999999999", "run": {"run_id": "none"}, "claims": [
         {"field": "legal_name", "value": "EMPTY AS", "availability": "available", "evidence_ids": []},

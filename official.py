@@ -38,8 +38,12 @@ def group(org: str):
 
 
 def accounts(org: str):
-    """All filed annual accounts. The endpoint returns a list; empty means none published."""
-    return fetch.json_get(f"{BRREG}/regnskapsregisteret/regnskap/{org}")
+    """All filed annual accounts. The endpoint returns a list; empty means none published.
+
+    This one endpoint gets its own timeout: measured 2026-10-22 at 05:00 UTC, a single account listing answered
+    in 18.2 seconds, against a 20 s default. The register's own documentation treats it as the rate-limited one.
+    """
+    return fetch.json_get(f"{BRREG}/regnskapsregisteret/regnskap/{org}", timeout=35)
 
 
 def _path(obj, dotted: str):
@@ -221,6 +225,29 @@ def _span(payload, limit: int = 400) -> str:
     return json.dumps(payload, ensure_ascii=False)[:limit]
 
 
+def _module(rows: list, doc, *, label: str, empty_reason: str) -> dict:
+    """Available when the register gave records, not_available only when it answered and had none, failed when
+    we never got an answer.
+
+    Measured 2026-10-22: a 1,000-company batch run at 05:00 UTC came back with 952 profiles saying "no filed
+    annual accounts published for this entity" — when the accounts endpoint had been timing out at 18 seconds a
+    call. An absence and a failure are different facts, and a profile that reports the first when the second
+    happened is worse than one that reports nothing.
+    """
+    if rows:
+        return {"status": "available", "value": rows, "doc": doc, "span": _span(rows[:3])}
+    status = getattr(doc, "status", None)
+    if doc is None or status is None:
+        return {"status": "failed", "state": "failed",
+                "why": f"{label}: no answer from data.brreg.no (connection failure or timeout)",
+                "doc": doc, "value": None}
+    if status in (200, 404):
+        return {"status": "not_available", "state": "not_available",
+                "why": f"{empty_reason} (HTTP {status})", "doc": doc, "value": None}
+    return {"status": "failed", "state": "failed", "why": f"{label}: register returned HTTP {status}",
+            "doc": doc, "value": None}
+
+
 def fetch_modules(org: str) -> dict:
     """The four live official modules, normalised, with the response kept for evidence.
 
@@ -231,35 +258,23 @@ def fetch_modules(org: str) -> dict:
 
     payload, doc = roles(org)
     rows = role_rows(payload)
-    out["roles"] = (
-        {"status": "available", "value": rows, "doc": doc, "span": _span(rows[:3])}
-        if rows
-        else {"status": "not_available", "state": "not_available", "why": f"roles endpoint returned no roles (HTTP {getattr(doc, 'status', 'n/a')})", "doc": doc, "value": None}
-    )
+    out["roles"] = _module(rows, doc, label="roles", empty_reason="the register lists no role holders for this entity")
 
     payload, doc = subunits(org)
     rows = subunit_rows(payload)
-    out["locations"] = (
-        {"status": "available", "value": rows, "doc": doc, "span": _span(rows[:2])}
-        if rows
-        else {"status": "not_available", "state": "not_available", "why": "no registered subunits under this entity", "doc": doc, "value": None}
-    )
+    out["locations"] = _module(rows, doc, label="subunits", empty_reason="no registered subunits under this entity")
+    if out["locations"]["status"] == "available":
+        out["locations"]["span"] = _span(rows[:2])
 
     payload, doc = group(org)
     rows = group_rows(payload)
-    out["group"] = (
-        {"status": "available", "value": rows, "doc": doc, "span": _span(rows[:3])}
-        if rows
-        else {"status": "not_available", "state": "not_available", "why": "not listed in any group structure (404 is the register's answer)", "doc": doc, "value": None}
-    )
+    out["group"] = _module(rows, doc, label="group structure", empty_reason="not listed in any group structure (404 is the register's answer)")
 
     payload, doc = accounts(org)
     rows = financial_rows(payload if isinstance(payload, list) else [])
-    out["financials"] = (
-        {"status": "available", "value": rows, "doc": doc, "span": _span(rows[:1])}
-        if rows
-        else {"status": "not_available", "state": "not_available", "why": "no filed annual accounts published for this entity", "doc": doc, "value": None}
-    )
+    out["financials"] = _module(rows, doc, label="annual accounts", empty_reason="no filed annual accounts published for this entity")
+    if out["financials"]["status"] == "available":
+        out["financials"]["span"] = _span(rows[:1])
     return out
 
 
@@ -297,6 +312,23 @@ if __name__ == "__main__":
     g, _ = group(org)
     gr = group_rows(g)
     assert gr and any(x.get("ownership") for x in gr), "group relationships must resolve"
+    # An absence and a failure are different facts. A 404 from the register is an answer; a 503 or a timeout
+    # is not, and a profile must not report either one as "this company has no accounts".
+    class FakeDoc:
+        def __init__(self, status):
+            self.status = status
+            self.url = "https://data.brreg.no/regnskapsregisteret/regnskap/1"
+            self.body = b"{}"
+            self.sha256 = "0" * 64
+            self.text = lambda: "{}"
+
+    empty = _module([], FakeDoc(404), label="annual accounts", empty_reason="no filed annual accounts published for this entity")
+    assert empty["status"] == "not_available" and "HTTP 404" in empty["why"], empty
+    broken = _module([], FakeDoc(503), label="annual accounts", empty_reason="no filed annual accounts published for this entity")
+    assert broken["status"] == "failed" and "503" in broken["why"], broken
+    gone = _module([], None, label="annual accounts", empty_reason="no filed annual accounts published for this entity")
+    assert gone["status"] == "failed" and "no answer" in gone["why"], gone
+
     none, ndoc = accounts("999999999")
     assert none is None or none == [], "no filing must stay absent, never zero"
     print(f"official self-test OK: {len(rr)} roles, {len(sr)} subunits, {len(fr)} account years, {len(gr)} group links")

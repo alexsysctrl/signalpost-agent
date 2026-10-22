@@ -16,6 +16,8 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
+import re
+import unicodedata
 from pathlib import Path
 
 import fetch
@@ -75,6 +77,61 @@ BULK_RENAMES = {
 }
 
 _bulk_meta: dict | None = None
+
+
+
+# Words a registered subunit name adds that are not part of a name: the company suffix, and the label for
+# the branch itself. Stripping them is what makes a comparison between a parent name and a branch name mean
+# something.
+# Care-of and responsible-person annotations the register stores inside a subunit name.
+NAME_ANNOTATION = ("c/o", "v/", "att.", "adv.")
+
+NAME_STRUCTURAL = {"as", "asa", "da", "kf", "ans", "sf", "ba", "ansk", "avd", "avdeling", "utsalg", "butikkavd", "firma"}
+
+
+def name_tokens(value: object) -> set[str]:
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    text = re.sub(r"[^a-z0-9æøå]+", " ", text)
+    return {w for w in text.split() if w and w not in NAME_STRUCTURAL and not w.isdigit() and len(w) >= 2}
+
+
+def is_distinct_trading_name(parent: object, candidate: object, localities: tuple[str, ...] = ()) -> bool:
+    """Is this registered subunit name a name of its own?
+
+    A subunit carries its own registered name, and for a lot of companies that name is what the storefront,
+    the sign or the booking page actually says: "FIRST HOTEL BREISETH" under GEST BREISETH AS, "KKTAKST" under
+    KNUDSEN & KNUDSEN AS. Those are worth publishing. Most subunit names are not new names at all — they are
+    the parent's name with a place attached ("INATUR NORGE AS AVD ASKER") or with its words reordered
+    ("RØDSTEN T VVS AS" under "T RØDSTEN VVS AS", measured). Comparing token sets after removing company
+    suffixes, branch labels and the registered locality words catches both: a name counts only when it brings a
+    word the parent's name does not already contain.
+    """
+    lowered = str(candidate or "").lower()
+    # "SAREPTA AS V/ ADV. TOM STAVNES" and "TO KANTEN C/O RUNE BIRKELAND" are a responsible person or a
+    # care-of line attached to the entity's own name. The register records them as the subunit's name, but
+    # nothing here is a brand, and the words that make them novel are someone's name.
+    if any(marker in lowered for marker in NAME_ANNOTATION):
+        return False
+
+    parent_tokens = name_tokens(parent)
+    candidate_tokens = name_tokens(candidate)
+    if not candidate_tokens or not parent_tokens:
+        return False
+    place = set()
+    for word in localities:
+        place |= name_tokens(word)
+    novel = candidate_tokens - parent_tokens - place
+    if not novel:
+        return False
+    # A word that only appears after a branch label names where the branch is, not what it is called.
+    # Subunits often have no address in the register's response, so the locality list cannot be trusted to
+    # catch these; the label itself can.
+    after_branch: set[str] = set()
+    for match in re.finditer(r"\b(?:avd|avdeling|utsalg|butikkavd|filial)[ .]+([a-zæøå0-9'\-]+)", lowered):
+        after_branch |= name_tokens(match.group(1))
+    if not (novel - after_branch):
+        return False
+    return any(len(word) >= 3 for word in novel)
 
 
 def bulk_snapshot() -> dict:
@@ -255,10 +312,31 @@ if __name__ == "__main__":
     assert doc and doc.status == 200
     assert "registered_purpose" in live, "live API must supply the purpose text"
     assert "registered_website" not in live, "confirmed: the live entity API carries no website field"
+    # Trading names: the register's own subunit names, judged for whether they say something new.
+    brand_cases = [
+        # (entity's registered name, the subunit's registered name, extra locality text, expected)
+        ("GEST BREISETH AS", "FIRST HOTEL BREISETH", (), True),
+        ("KNUDSEN & KNUDSEN AS", "KKTAKST", (), True),
+        ("INATUR NORGE AS", "INATUR NORGE AS AVD ASKER", ("ASKER",), False),
+        ("T RØDSTEN VVS AS", "RØDSTEN T VVS AS", (), False),
+        ("AGATON SAX ANDENES AS", "AGATON SAX", ("ANDENES",), False),
+        ("HAALOGALASKO AS", "", (), False),
+        ("SAREPTA AS", "SAREPTA AS V/ ADV. TOM STAVNES", (), False),
+        ("TO KANTEN AS", "TO KANTEN C/O RUNE BIRKELAND", (), False),
+        ("ALUHAK DRIFT AS", "ALUHAK DRIFT AS AVD STAVANGER", (), False),
+        ("ALUHAK DRIFT AS", "ALUHAK DRIFT AS AVD PEOPLE", (), False),
+        ("ALERIS HELSE AS", "ALERIS AGDER", (), True),
+        ("TJOMSLAND AS", "REMA 1000 LYNGDAL", (), True),
+    ]
+    for parent, candidate, localities, expected in brand_cases:
+        got = is_distinct_trading_name(parent, candidate, localities=localities)
+        assert got is expected, f"{parent!r} -> {candidate!r}: expected {expected}, got {got}"
+    brand_ok = sum(1 for _, _, _, expected in brand_cases if expected)
+
     meta = bulk_snapshot()
     assert len(meta["content_sha256"]) == 64, "bulk file must be hashed for evidence to be checkable"
     assert meta["matched"] == 2
     print(
         f"identity self-test OK: bulk fields {len(bulk)}, live fields {len(live)}, "
-        f"bulk sha256 {meta['content_sha256'][:12]}"
+        f"trading-name rules {len(brand_cases)}/{len(brand_cases)} ({brand_ok} brands accepted), bulk sha256 {meta['content_sha256'][:12]}"
     )
