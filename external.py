@@ -66,7 +66,36 @@ def handle_matches_company(handle: str, legal_name: str) -> bool:
     return any(nt in t or t in nt for t in tokens for nt in name_tokens if len(t) >= 4 and len(nt) >= 4)
 
 
-def extract_handles(text: str, legal_name: str = "") -> list[dict[str, str]]:
+def _handle_matches_relation(handle: str, names) -> str:
+    """Which registered group relation this handle is spelled from, if any.
+
+    The auditor's case (2026-10-22): a subsidiary's page carries its parent group's LinkedIn account in the
+    footer. The page names the subsidiary, so proximity looks like attribution — it isn't. The register already
+    states who owns whom, so a handle whose leading word is a parent's registered brand word is the group's
+    footprint, not this company's.
+
+    This is deliberately narrower than handle_matches_company and is only ever consulted when that test has
+    already failed for the company itself: a child named after its group keeps its own account, because the
+    company match is tried first.
+    """
+    slug = re.sub(r"[^a-z0-9]+", " ", handle.lower()).strip()
+    tokens = [t for t in slug.split() if len(t) >= 3]
+    if not tokens:
+        return ""
+    first = tokens[0]
+    for name in names or ():
+        brand = discover.name_tokens(name)
+        if not brand or len(brand[0]) < 3:
+            continue
+        lead = brand[0]
+        if first.startswith(lead) or lead.startswith(first):
+            return name
+    return ""
+
+
+def extract_handles(
+    text: str, legal_name: str = "", group_names: tuple[str, ...] | list[str] = ()
+) -> list[dict[str, str]]:
     """Social profile handles referenced by a page, deduplicated, with obvious widgets removed."""
     out: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -88,6 +117,8 @@ def extract_handles(text: str, legal_name: str = "") -> list[dict[str, str]]:
             seen.add(key)
             record = {"platform": platform, "handle": handle, "url": match.group(0)}
             if legal_name and not handle_matches_company(handle, legal_name):
+                if _handle_matches_relation(handle, group_names):
+                    continue  # the group's own account, sitting on its subsidiary's page
                 if not _names_this_company_around(text, match.start(), legal_name):
                     continue  # a group or affiliate profile is not this company's footprint
             out.append(record)
@@ -190,6 +221,7 @@ def site_observations(
     page_paths: list[str] | None = None,
     requested_host: str = "",
     extra_docs: list | None = None,
+    group_names: tuple[str, ...] | list[str] = (),
 ) -> list[dict[str, Any]]:
     """Observations about this company's external profiles, from its own verified page(s)."""
     text = doc.text()
@@ -205,7 +237,7 @@ def site_observations(
     # inner page counts just as much as one on the homepage. Reading only the page that proved identity
     # is why multi-platform coverage was low: measured 2026-10-21, 11 of 40 companies.
     for page in [doc] + list(extra_docs or []):
-        for item in extract_handles(page.text(), legal_name):
+        for item in extract_handles(page.text(), legal_name, group_names):
             if (item["platform"], item["handle"].lower()) in seen:
                 continue
             seen.add((item["platform"], item["handle"].lower()))
@@ -492,7 +524,40 @@ def _span(text: str, terms: list[str], before: int = 100, after: int = 140) -> s
     return ""
 
 
-def news_observations(org: str, legal_name: str, articles: list[dict], _unused=None) -> list[dict[str, Any]]:
+_DATE_META_NAMES = r"(?:article:published_time|article:published|og:published_time|datePublished|publishdate|pubdate)"
+_DATE = r"(\d{4}-\d{2}-\d{2})"
+_QUOTE = "[\"']"
+
+PUBLISH_DATE_PATTERNS = (
+    re.compile("<time[^>]+datetime=" + _QUOTE + "?" + _DATE, re.I),
+    re.compile(
+        "<meta[^>]+(?:property|name|itemprop)=" + _QUOTE + _DATE_META_NAMES + _QUOTE + "[^>]*content=" + _QUOTE + "?" + _DATE,
+        re.I,
+    ),
+    re.compile(
+        "<meta[^>]*content=" + _QUOTE + "?" + _DATE + _QUOTE + "[^>]*(?:property|name|itemprop)=" + _QUOTE + _DATE_META_NAMES,
+        re.I,
+    ),
+    re.compile(_QUOTE + "datePublished" + _QUOTE + r"\s*:\s*" + _QUOTE + _DATE, re.I),
+)
+
+
+def publisher_date(text: str) -> str:
+    """The publish date the publisher itself prints, or an empty string.
+
+    Asked for by the auditor on 2026-10-22: "check each news item is a real, dated post about the company."
+    A date in a news feed is the feed's claim, not the publisher's, and it is the thing that was challenged.
+    Only a date carried on the fetched article page — a <time> element, an article:published_time meta tag, or
+    a datePublished in the page's own structured data — counts as a dated post.
+    """
+    for pattern in PUBLISH_DATE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def news_observations(org: str, legal_name: str, articles: list[dict], _unused=None) -> list[dict]:
     """Dated third-party mentions of this company, from pages we fetched ourselves.
 
     Proof is stricter than page proof (discover.mention_identity_proof): the organisation number, the
@@ -509,6 +574,7 @@ def news_observations(org: str, legal_name: str, articles: list[dict], _unused=N
         verdict = discover.mention_identity_proof(org, legal_name, text)
         terms = discover.full_name_strings(legal_name) + discover.name_tokens(legal_name)
         span = _span(text, terms)
+        on_page = publisher_date(text)
         records.append(
             {
                 "id": f"obx-{org}-news-{doc.sha256[:16]}",
@@ -524,7 +590,8 @@ def news_observations(org: str, legal_name: str, articles: list[dict], _unused=N
                 "retrieved_at": doc.retrieved_at,
                 "content_sha256": doc.sha256,
                 "evidence_span": span[:400],
-                "published_at": art.get("published_at"),
+                "published_at": on_page or art.get("published_at"),
+                "publish_date_source": "publisher_page" if on_page else ("feed_only" if art.get("published_at") else "none"),
                 "publisher": host_of(doc.url),
                 "publisher_index": art.get("index"),
                 "title": re.sub(r"\s+", " ", art.get("title", ""))[:200],
@@ -669,11 +736,50 @@ if __name__ == "__main__":
     orphan = registry_observations("976605713", "KITRON ASA", registry_fields, EntityDoc(), ["2025"])
     assert not any(o["signal_type"] == "profile_metrics" for o in orphan), "no accounts payload in hand, no filing-count claim"
     assert any(o["signal_type"] == "workforce_snapshot" for o in got), "an employee count filed to the register is a dated workforce statement"
+    # A group's own account, sitting on its subsidiary's page. The footer names the subsidiary, so proximity
+    # alone would publish it — the register's group structure is what refuses it.
+    group_page = (
+        page
+        + ' <footer>KITRON ASA er en del av A2G GRUPPEN AS. '
+        + '<a href="https://www.linkedin.com/company/a2g-gruppen-as">Følg konsernet</a></footer>'
+    )
+    without = {(o["platform"], o["handle"]) for o in extract_handles(group_page, "KITRON ASA")}
+    with_groups = {(o["platform"], o["handle"]) for o in extract_handles(group_page, "KITRON ASA", ["A2G GRUPPEN AS"])}
+    assert ("linkedin", "a2g-gruppen-as") in without, without
+    assert not any("a2g" in h for _, h in with_groups), with_groups
+    assert ("linkedin", "kitron-asa") in with_groups, "the company's own account must still pass"
+
+    # A date the publisher prints itself, versus a date a feed asserts about it.
+    dated = (
+        '<article><time datetime="2026-05-14T09:12:00+02:00">14. mai 2026</time>'
+        '<p>Kitron ASA meldte kvartalstall.</p></article>'
+    )
+    meta_dated = '<meta property="og:published_time" content="2026-05-14"><p>Kitron ASA meldte tall.</p>'
+    jsonld_dated = '<script type="application/ld+json">{"@type":"NewsArticle","datePublished":"2026-03-02"}</script> Kitron ASA.'
+    assert publisher_date(dated) == "2026-05-14", publisher_date(dated)
+    assert publisher_date(meta_dated) == "2026-05-14", publisher_date(meta_dated)
+    assert publisher_date(jsonld_dated) == "2026-03-02", publisher_date(jsonld_dated)
+    assert publisher_date("<article>Kitron ASA nevnes i en sak uten dato.</article>") == ""
+    news_records = news_observations(
+        "976605713",
+        "KITRON ASA",
+        [
+            {"title": "Kitron ASA meldte tall", "published_at": "2026-05-01", "doc": TypeDoc(dated, "https://example.com/a")},
+            {"title": "Kitron ASA i sak", "published_at": "2026-04-01", "doc": TypeDoc("<p>Kitron ASA nevnes.</p>", "https://example.com/b")},
+        ],
+    )
+    assert [r["publish_date_source"] for r in news_records] == ["publisher_page", "feed_only"], news_records
+    assert news_records[0]["published_at"] == "2026-05-14", news_records[0]
+
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("ef", "../signalpost-starter-kit/src/norway_company_agent/external_footprint.py")
     ef = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ef)
-    bad = [(o["id"], ef.validate_observation(o)) for o in obs if ef.validate_observation(o)]
+    bad = [(o["id"], ef.validate_observation(o)) for o in obs + news_records if ef.validate_observation(o)]
     assert not bad, bad
-    print(f"external self-test OK: {len(obs)} observations accepted by their validator, careers detection exact on the shapes found on 26 real sites")
+    print(
+        f"external self-test OK: {len(obs)} observations accepted by their validator, careers detection exact on the shapes "
+        f"found on 26 real sites, a group's own account refused on its subsidiary's page, "
+        f"news dated from the publisher's page only ({sum(1 for r in news_records if r['publish_date_source'] == 'publisher_page')} of {len(news_records)})"
+    )

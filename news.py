@@ -137,14 +137,26 @@ if __name__ == "__main__":
     items = bing_articles("KITRON ASA", limit=5)
     assert items, "KITRON ASA is in the news; a live index query must return candidates"
     assert all("bing.com" not in i["article_url"] for i in items), [i["article_url"] for i in items]
-    doc = fetch_article(items[0])
-    assert doc is not None, "the publisher page must be fetchable directly"
+    # A live test must not fail because one publisher happens to block us today. What has to hold is that a
+    # real news item can be reached at its own address — so every candidate is tried, and the test reports
+    # how many were reachable rather than assuming the first one is.
+    reached = [(item, doc) for item in items if (doc := fetch_article(item)) is not None]
+    assert reached, f"none of {len(items)} real news items could be fetched from the publisher directly: {[i['article_url'] for i in items]}"
+    item, doc = reached[0]
     landed = (urlparse(doc.url).hostname or "").casefold().removeprefix("www.")
-    assert landed == items[0]["publisher_domain"], f"redirect landed elsewhere: {landed} vs {items[0]['publisher_domain']}"
+    assert landed == item["publisher_domain"], f"redirect landed elsewhere: {landed} vs {item['publisher_domain']}"
     verdict = exact_entity_in_article("KITRON ASA", doc.text())
     assert verdict["level"] == 2, f"a Kitron ASA article must prove the registered name phrase, got {verdict}"
     collision = exact_entity_in_article("HUNDRALEDEN 4 BORETTSLAG UKN", doc.text())
     assert collision["level"] == 0, collision
+
+    import external
+
+    dated = sum(1 for _, d in reached if external.publisher_date(d.text()))
+    print(
+        f"news self-test OK: {len(reached)} of {len(items)} real articles fetched from the publisher directly, "
+        f"{dated} of those {len(reached)} carry a publish date on the page itself (feed dates are never published)"
+    )
     g = google_news_domains("KITRON ASA", limit=3)
     assert all(x["publisher_domain"] for x in g)
     print(

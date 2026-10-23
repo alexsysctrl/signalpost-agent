@@ -193,8 +193,30 @@ def subunit_rows(payload: dict) -> list[dict]:
     return out
 
 
-def group_rows(payload: dict) -> list[dict]:
+def group_rows(payload: dict, org: str = "") -> list[dict]:
+    """The group structure, including where the register says this entity sits under it.
+
+    The structure endpoint answers with the group head's own record: its organisasjonsnummer and navn are at
+    the top of the response, whichever member you asked about. Measured 2026-10-23 on the 59 group records in
+    a 1,000-company run — 45 of them were keyed at a different entity, and that fact was being thrown away,
+    because only the children were kept. It is the fact a group-owned website has to be tested against, so it
+    is read out here as a row.
+    """
     out: list[dict] = []
+    root_org = (payload or {}).get("organisasjonsnummer")
+    root_name = (payload or {}).get("navn")
+    if root_org and root_name and org and str(root_org) != str(org):
+        out.append(
+            {
+                "relation": "overordnet konsern",
+                "ownership": "",
+                "organisation_number": root_org,
+                "name": root_name,
+                "form": (payload.get("organisasjonsform") or {}).get("beskrivelse"),
+                "linked_since": "",
+                "level": 0,
+            }
+        )
     for c in (payload or {}).get("children") or []:
         out.append(
             {
@@ -267,7 +289,7 @@ def fetch_modules(org: str) -> dict:
         out["locations"]["span"] = _span(rows[:2])
 
     payload, doc = group(org)
-    rows = group_rows(payload)
+    rows = group_rows(payload, org)
     out["group"] = _module(rows, doc, label="group structure", empty_reason="not listed in any group structure (404 is the register's answer)")
 
     payload, doc = accounts(org)
@@ -310,8 +332,16 @@ if __name__ == "__main__":
     latest = fr[0]
     assert latest.get("assets") and latest.get("equity") and latest.get("debt"), f"balance sheet figures missing: {latest}"
     g, _ = group(org)
-    gr = group_rows(g)
+    gr = group_rows(g, org)
     assert gr and any(x.get("ownership") for x in gr), "group relationships must resolve"
+    # A member's structure is answered keyed at the group head — that is the register naming the parent, and it
+    # is the fact a group-owned domain has to be tested against. Measured case: GÅLÅ IDRETTSANLEGG AS.
+    child, _c = group("951146528")
+    cr = group_rows(child, "951146528")
+    head = next((x for x in cr if x.get("relation") == "overordnet konsern"), None)
+    assert head and head["organisation_number"] == "912030555" and head["name"] == "GÅLÅ EIENDOM AS", cr
+    own_head = group_rows(group("912030555")[0], "912030555")
+    assert not any(x.get("relation") == "overordnet konsern" for x in own_head), "a group head is not its own parent"
     # An absence and a failure are different facts. A 404 from the register is an answer; a 503 or a timeout
     # is not, and a profile must not report either one as "this company has no accounts".
     class FakeDoc:

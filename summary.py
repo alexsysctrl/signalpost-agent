@@ -36,6 +36,7 @@ CURRENCY_FIELDS = ("revenue", "operating_result", "annual_result", "assets", "de
 FIELD_LABELS = {
     "legal_name": "registered name",
     "trading_names": "registered trading names",
+    "news_mentions": "dated news mentions",
     "legal_form": "legal form",
     "industry": "industry classification",
     "secondary_industry": "secondary industry classification",
@@ -257,9 +258,25 @@ def build(envelope: dict) -> dict:
     activity: list[dict] = []
     group = held(envelope, "group")
     if isinstance(group, dict) and group.get("count"):
-        activity.append(line(f"Registered group relationships: {group['count']}.", "group"))
+        # The register answers a group query with the group head's own record, so a member's structure names
+        # what it sits under. Saying which group a company belongs to is a fact the reader can check, and it is
+        # the fact that decides whether a shared website or account belongs to this entity at all.
+        parent = next((r for r in (group.get("sample") or []) if r.get("relation") == "overordnet konsern"), None)
+        if parent and parent.get("name"):
+            activity.append(
+                line(
+                    f"Registered group relationships: {group['count']}. In the register's group structure this entity sits under {parent['name']}.",
+                    "group",
+                )
+            )
+        else:
+            activity.append(line(f"Registered group relationships: {group['count']}.", "group"))
     elif held(envelope, "part_of_group") is True:
         activity.append(line("The register records this entity as part of a group.", "part_of_group"))
+    elif held(envelope, "part_of_group") is False:
+        # Measured 2026-10-23: the register's erIKonsern flag answers False for almost every entity, and a
+        # run that stores that answer but never says it leaves a reader to guess. The negative is a finding.
+        activity.append(line("The register records this entity as not part of a group.", "part_of_group"))
     for observation in envelope.get("observations") or []:
         if str(observation.get("signal_type")) in ACTIVITY_TYPES:
             activity.append(

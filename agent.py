@@ -263,6 +263,23 @@ def _claim_identity(record, org: str, fields: dict, bulk_row: dict) -> None:
             record.record_not_available(claim_name, f"registry bulk column {column}")
 
 
+def _parent_names(modules: dict) -> list[str]:
+    """The group relations this entity is registered under, from the register's own structure.
+
+    No new requests: the group module is fetched for every company anyway. It is what makes the auditor's
+    question of 2026-10-22 answerable — a subsidiary's website and social accounts are often its parent's,
+    and the register states who owns whom (konsernstruktur, relation "overordnet enhet").
+    """
+    value = (modules.get("group") or {}).get("value") or []
+    if isinstance(value, dict):
+        value = value.get("sample") or []
+    return [
+        row.get("name") or ""
+        for row in value
+        if row.get("relation") in ("overordnet konsern", "overordnet enhet") and row.get("name")
+    ]
+
+
 def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = True, budget_s: float = 90.0) -> dict:
     """One company, end to end, inside a wall-clock budget.
 
@@ -394,7 +411,20 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
         account_years,
         accounts_doc=(modules.get("financials") or {}).get("doc"),
     )
+    # Is the site we found actually this company's, or the group's? The register names the parent, so the
+    # test is free. A page that prints this organisation number is this company's whatever domain it sits on;
+    # a page accepted on name-and-locality that lives on a domain spelled from the parent's name is the
+    # group's, and publishing its accounts, listings and mentions as this company's is the wrong-entity error
+    # the competition fails a run for.
+    parents = _parent_names(modules)
+    group_site: dict = {}
     if site["availability"] == "available":
+        hosts = [h for h in (site.get("host"), site.get("final_host")) if h]
+        own_domain = any(discover.domain_owned_by(h, fields["legal_name"]) for h in hosts)
+        if parents and not own_domain and site.get("level") != 1:
+            group_site = discover.group_domain_owner(hosts, parents)
+
+    if site["availability"] == "available" and not group_site:
         record.claim(
             "official_website",
             site["url"],
@@ -422,6 +452,15 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
             page_paths=site.get("pages"),
             requested_host=site.get("host", ""),
             extra_docs=extra,
+            group_names=parents,
+        )
+    elif group_site:
+        record.record(
+            "official_website",
+            "ambiguous",
+            f"{group_site['host']} is spelled from {group_site['name']}, a group relation of this company; "
+            "the page does not print this organisation number, so it is treated as the group's site",
+            checked="registry group structure (konsernstruktur), domain-name comparison",
         )
     elif site["availability"] == "ambiguous":
         record.record("official_website", "ambiguous", site.get("proof", "name matches only"), checked="generated candidate domains")
@@ -469,12 +508,26 @@ def build_record(org: str, fields: dict, bulk_row: dict, *, with_news: bool = Tr
             fields.get("business_municipality") or fields.get("postal_address") or "",
             limit=3,
         )
+        dated: list[dict] = []
+        seen_news = 0
         for article in articles:
             doc = news.fetch_article(article)
             if doc is None:
                 continue
-            news_obs = external.news_observations(org, fields["legal_name"], [{**article, "doc": doc}], None)
-            observations += news_obs
+            seen_news += 1
+            found = external.news_observations(org, fields["legal_name"], [{**article, "doc": doc}], None)
+            # A date in a news feed is the feed's claim about when something was posted, not the publisher's.
+            # The auditor asked for real, dated posts, so only a date the publisher's own page carries is
+            # published. What was seen and could not be dated is said in the profile rather than dropped.
+            dated += [o for o in found if o.get("publish_date_source") == "publisher_page"]
+        observations += dated
+        if seen_news and not dated:
+            record.record(
+                "news_mentions",
+                "not_available",
+                f"{seen_news} article{'' if seen_news == 1 else 's'} matched the company name; none carried a publish date on the publisher's own page",
+                checked="news feed search, publisher page fetched and read for a publish date",
+            )
 
     record.requests = fetch.counts()["http"]
     profile = profile_from_record(org, fields, record, site, bulk_row)

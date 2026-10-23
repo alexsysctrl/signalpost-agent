@@ -1,5 +1,5 @@
 {
-  "run_directory": "out/smoke100f",
+  "run_directory": "out/smoke-v3c",
   "reports": {
     "batch": {
       "inputs": 100,
@@ -7,12 +7,12 @@
       "inputs_without_an_envelope": 0,
       "contract_passed": true,
       "models_used": [],
-      "wall_clock_s": 274.1,
-      "requests_total": 1063,
+      "wall_clock_s": 283.0,
+      "requests_total": 1056,
       "per_company_ms": {
-        "median": 9058,
-        "p95": 44909,
-        "max": 82807
+        "median": 11160,
+        "p95": 45529,
+        "max": 80992
       },
       "third_party_cost_usd": 0.0,
       "rate_policy_s": {

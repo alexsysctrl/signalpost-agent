@@ -39,7 +39,14 @@ independent draw, not a subset of the 1,000-company batch described in [`MEASURE
 
 149 findings were produced and **all 149 were accepted by the competition's own acceptance rules** — none had to
 be dropped: 110 from the registers, 17 from the companies' own sites, 9 Facebook profiles, 6 LinkedIn company
-profiles, 4 Instagram, 1 X profile, 2 dated news mentions. 17 companies appear on two or more platforms, and 3 of these companies have a registered trading name distinct from their legal name.
+profiles, 4 Instagram, 1 X profile, 2 news mentions. 17 companies appear on two or more sources and 8 on two or
+more open-web platforms, and 3 of these companies have a registered trading name distinct from their legal name.
+
+What the three rules the reviewer asked for did on this sample: 8 of the 100 profiles name the group they sit
+under, read from the register's own group structure; **no** verified website in this batch turned out to be a
+parent group's domain, so the group-ownership guard published nothing here and refused nothing here — that is the
+honest reading of a 100-company sample, and the 1,000-company batch reports one such case; and both news findings
+in this batch carry their date from the publisher's own page.
 
 A profile claim and a published finding are different records, and the counts above are deliberately separated:
 claims fill the profile, findings are the cross-source observations the external evaluator reads. Every one of the
@@ -57,17 +64,17 @@ register figures compared against the live API.
 - Entity precision **1.000**, metric precision **1.000**, qualification passed.
 - 138 of the 149 findings were re-derived from evidence this run kept (99 filing counts from the register
   payloads, 39 from kept pages); the other 11 were register workforce figures compared against the live register
-  API. Of those 39 pages, re-asked a few minutes later, 17 returned identical bytes and
+  API. Of those 39 pages, re-asked a few minutes later, 22 returned identical bytes and
   **22 had changed, redirected elsewhere, or stopped answering.**
 - Read-back of the rendered page: 2,511 stated facts across 100 profiles, 0 sentences without a claim behind them,
   0 facts presented without provenance, 100 of 100 profiles stating what was searched and not found.
 
 ## What it cost
 
-- 274 seconds of wall clock for 100 companies with 6 workers; median 9.1 seconds per company, 95th percentile
-  44.9 seconds, against a 90-second budget per company
-- 1,063 HTTP requests, of which 6 were served from the run's own cache and 2 avoided because the host was already
-  known to be unreachable; 687 evidence pages written, 16 MB
+- 283 seconds of wall clock for 100 companies with 6 workers; median 11.2 seconds per company, 95th percentile
+  45.5 seconds, worst 81.0 seconds, against a 90-second budget per company
+- 1,056 HTTP requests, of which 6 were served from the run's own cache and 3 avoided because the host was already
+  known to be unreachable; 686 evidence pages written, 16 MB
 - **$0.00** to third parties. No paid API, and no model used to read or summarise any evidence (`models_used: []`
   in the run report).
 - Request policy: minimum gap per host of 0.05 s to the registry, 0.20 s elsewhere, 0.30 s to news, 0.35 s to

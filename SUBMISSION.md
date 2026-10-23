@@ -1,12 +1,12 @@
 # Submission
 
-Entry for the Signalpost competition. Submitted by Alex Sys, alex@sqopa.com.
+Entry for the Signalpost competition. Submitted by Alex from SQOPA, alex@sqopa.com.
 
 | | |
 |---|---|
 | Agent name | `sqopa-signalpost` (the crawler user agent and the run report both carry this name) |
 | Repository | https://github.com/alexsysctrl/signalpost-agent |
-| Versions submitted | `v1` and `v2`, both tagged in this repository; the commit hash for the version being scored is given in the submission email |
+| Versions submitted | `v1`, `v2` and `v3`, all tagged in this repository; the commit hash for the version being scored is given in the submission email |
 | Contact for results | alex@sqopa.com |
 
 ## One run command
@@ -61,13 +61,13 @@ registry read, one 4 s retry; 600 KB per page maximum.
 ## Expected cost per official batch (1,000–1,100 companies)
 
 - **$0.00** to third parties.
-- Requests: about 10,200–11,300.
-- Wall clock: 39 to 55 minutes measured for 1,000 companies with 6 workers across four batches of the same
-  companies (median 8.9–9.4 s per company, 95th percentile 41–45 s, against a 90-second budget per company). The
-  request counts varied by 0.1% between those runs and the wall clock by 40%: the difference is upstream response
-  time, not work. With 1,100 companies expect the same shape at the same worker count; wall clock scales with
-  workers, while per-host pressure stays bounded by the gaps above.
-- Disk: the run writes its outputs plus an evidence archive — measured 6,768 pages, 123 MB for 1,000 companies.
+- Requests: about 10,200.
+- Wall clock: **39–40 minutes** measured for 1,000 companies with 6 workers, in two runs of the same companies with
+  the code in this repository (median 9.1–9.3 s per company, 95th percentile 44.2–44.5 s, against a 90-second budget
+  per company). The request counts varied by 0.2% between the two runs while an earlier build measured 55 minutes on
+  the same companies: the difference is upstream response time, not work. With 1,100 companies expect the same shape
+  at the same worker count; wall clock scales with workers, while per-host pressure stays bounded by the gaps above.
+- Disk: the run writes its outputs plus an evidence archive — measured 6,768–6,769 pages, 125 MB for 1,000 companies.
 - Memory: about 60 MB resident during a batch (measured on a running batch).
 
 ## What this entry is careful about
@@ -86,8 +86,8 @@ registry read, one 4 s retry; 600 KB per page maximum.
   labels naming a town (`… AVD STAVANGER`) are not brands and are not published. This was decided by reading every
   published example, not by sampling one: 34 candidates became 27.
 - **Claims are stored against the bytes they were read from.** Every evidence record carries a content hash and a
-  retrieval time, and the run writes the page it hashed. Sources on the open web change — measured, 38% of
-  re-checked live sources had changed or stopped answering within about an hour — so a claim is verifiable
+  retrieval time, and the run writes the page it hashed. Sources on the open web change — measured, 42 of the 101
+  re-checked live pages had changed, redirected or stopped answering within about an hour — so a claim is verifiable
   against what was actually read, and a later change is reported as a change rather than mistaken for an error.
 - **Repetition is expected, not hidden.** `--previous` replays a batch against its own snapshots and reports only
   field-level changes; re-deriving the same diff twice gives the same answer, and a snapshot compared with itself
@@ -99,7 +99,8 @@ The population sets the ceiling, not the implementation. Within the frozen unive
 for 10.9% of organisations and an employee count for 14.5%; this agent reaches websites at roughly double the
 listed rate and employee counts at the register's own rate. Company self-published ratings are close to absent in
 Norway (3 companies in 1,000 measured). Hiring signals are sparse (27 companies in 1,000 carry two or more
-job links on their own site; a national vacancy feed matched none of them). Dated activity is sparser still (4 of
-the 202 company sites a run kept publish machine-readable dates). Sentiment is not attempted, because
+job links on their own site; a national vacancy feed matched none of them). Dated activity is sparser still (of the
+214 distinct company-site pages a run of this code kept, 5 carry a machine-readable date, covering 4 companies).
+Sentiment is not attempted, because
 no Norwegian company-text dataset with usable rights and independent labels was available — so no sentiment
 claim is published rather than a weak one.

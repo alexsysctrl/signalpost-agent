@@ -34,7 +34,8 @@ supported; the rest are explicit statements that something was looked for and no
 | | Companies |
 |---|---|
 | Legal identity: name, legal form, organisation number | 1,000 |
-| Registered activity, and the year of the latest filed accounts | 998 |
+| Registered activity | 1,000 |
+| The year of the latest filed accounts | 998 |
 | Filed annual accounts (figures, by year) | 997 — 3 recorded as a failed source |
 | Registered role holders | 997 |
 | VAT registration | 997 |
@@ -45,9 +46,13 @@ supported; the rest are explicit statements that something was looked for and no
 | Registered workplaces (subunits) | 776 |
 | Contact details published by the register: e-mail / phone | 237 / 187 |
 | Employee figure | 144 |
-| Part of a registered group | 59 |
-| A verified company website | 202 |
+| A verified company website | 200 |
 | A registered trading name distinct from the legal name | 27 |
+
+Group membership is a field of the register itself (`erIKonsern`), and it answers for every company: 998 of these
+1,000 are recorded as **not** part of a group, and the profile says so rather than leaving the reader to infer it
+from an absent line. 59 are in a group structure; for 45 of those the register names the entity this company sits
+under, and the profile states it.
 
 Figures come from the accounts filed under that organisation number. Where a company also files consolidated
 group accounts, the group figures are published only if the company's own filing does not carry that line, and
@@ -82,36 +87,79 @@ table, and the count of accepted brands is printed.
 
 ## What was found in sources outside the register
 
-1,601 findings were produced. The competition's own acceptance rules accepted **1,599** and refused 2 — both news
-mentions that could not establish the exact legal entity. Refusal is recorded, not quietly dropped.
+1,602 findings were produced. The competition's own acceptance rules accepted **1,601** and refused 1 — a news
+mention that could not establish the exact legal entity. Refusal is recorded, not quietly dropped.
 
 | | Findings |
 |---|---|
 | Derived from the registers (filing history, workforce) | 1,141 |
-| Genuinely outside the registers | **460** |
+| Genuinely outside the registers | **461** |
 
 | Outside the register | Companies | Findings |
 |---|---|---|
-| Own website, proven to belong to that company | 202 | 202 |
-| — proven by the organisation number printed on the page | 36 | |
-| — proven by registered name with locality, or by a domain the company's own records point at | 166 | |
+| Own website, proven to belong to that company | 200 | 200 |
+| — proven by the organisation number printed on the page | 37 | |
+| — proven by registered name with locality, or by a domain the company's own records point at | 163 | |
 | A plausible website that could not be tied to the company | 99 | reported as `ambiguous`, never published |
-| Profile handles: Facebook 93, LinkedIn 46, Instagram 56, X 7, TikTok 5, YouTube 4 | — | 211 |
+| Profile handles: Facebook 95, Instagram 57, LinkedIn 47, X 7, TikTok 5, YouTube 4 | — | 215 |
 | Job listings on the company's own site | 27 | 27 |
-| Dated public mentions in news | 12 | 16 |
+| Public mentions in news, each dated by its publisher | 11 | 15 |
 | Ratings a company publishes about itself | 3 | 4 |
-| Companies with at least one finding outside the registers | 209 | |
+| Companies with at least one finding outside the registers | 206 | |
+| Companies with findings from two or more sources | 205 | |
+| Companies with two or more distinct open-web platforms (the register not counted) | 99 | |
 
-How the websites were reached, for the 202 that were proven: 120 from a domain derived from the company's own
-name, 54 from a website the register already lists, 28 from the domain of the company's registered e-mail
-address. A name-only match is never published as a fact: 99 candidates in this batch resolved to a real site that
-could not be tied to the company, and all 99 are reported as unproven. A page that is a domain marketplace
-(a parked domain for sale) is not a company's website either — that rule came out of diffing two runs of this
-batch, where 2 of 6 reported "website changes" were hughedomains.com and aftermarket.eu listings.
+How the 201 verified sites were reached: 120 from a domain derived from the company's own name, 54 from a website
+the register already lists, 27 from the domain of the company's registered e-mail address. 200 of those 201 are
+published as the company's own website; the other one was found to belong to its parent group and is recorded that
+way instead (below). A name-only match is never published as a fact: 98 candidates in this batch resolved to a real
+site that could not be tied to the company, and all of them are reported as unproven. A page that is a domain
+marketplace (a parked domain for sale) is not a company's website either — that rule came out of diffing two runs
+of this batch, where 2 of 6 reported "website changes" were hughedomains.com and aftermarket.eu listings.
 
 Only the company's own profile counts as its footprint: `linkedin.com/company/…`, not a person's profile link.
 That was decided by measurement — on an earlier 100-company batch, four of the five findings that failed to
 re-confirm were people links, which describe a person and rotate on the page.
+
+## Three rules a reviewer asked for, and what they changed here
+
+The entry was read by one of the organisers, who raised three specific objections: a website might be a parent
+group's rather than the company's; a social handle might belong to a group or an agency; a news item might not be
+a real, dated post. Each one was measured before it was coded for, and the honest answers are different.
+
+**A group's site is not its subsidiary's site.** The register's group endpoint (`konsernstruktur/{number}`) does
+not answer about the company you asked for. It resolves to the head of the group and returns that record, whose
+name and organisation number sit at the top of the response. Reading only the child rows — which is what this
+agent did until it was checked — throws that away: of the 59 companies in this batch with a group record,
+**45 had a different entity named as the head of their structure**, and none of those facts reached a profile.
+The parent is now read out, both into the profile and into a test: a verified domain is treated as the group's
+when it is spelled from the group's registered name and the page does not print this organisation number. In this
+batch that happened **once** — TELLNES NÆRINGSPARK TOMT 2 AS was about to be given `telle-tre.no`, which is
+spelled from its parent TELLE GRUPPEN AS, so the profile records the website as ambiguous and says why.
+
+Across the whole population that is one company in a thousand, and the document says so rather than implying a
+bigger fix. What is common instead is a domain shared by a family: RESTECH NORWAY AS on `restech.no` under its
+parent RESTECH HOLDING AS, BLADET NORDLYS AS on `nordlys.no` under AMEDIA AS. Those domains match the
+subsidiary's own registered brand, so they are published as the company's site, and its accounts and mentions are
+filtered by ownership instead. A chain brand that appears in neither registered name (BILPARTNER NAMSOS AS under
+BILSENTERET INVEST AS) cannot be assigned from names at all, and no rule pretends otherwise.
+
+**A handle has to belong to this company.** A handle that shares no distinctive word with the company's registered
+name was already refused unless the link stood next to the company's name or its organisation number. That second
+condition was the hole the reviewer found: a footer reading "part of the group" next to the group's own account
+passes proximity and is still not the subsidiary's footprint. A handle whose leading word is a registered group
+relation's brand word is now refused even when the page names the company. The company's own account still passes,
+because the company is tried first. Result in this batch: 215 handles published, and the rule is in the self-test
+against the exact shape — a group's LinkedIn account in a subsidiary's footer.
+
+**A news item has to be dated by its publisher.** A date in a news feed is the feed's claim about when something
+was posted; the auditor was asking whether the publisher says it. A published mention now needs a date carried by
+the fetched article page itself — a `<time datetime=…>`, an `article:published_time` or `og:published_time` meta
+tag, or `datePublished` in the page's own structured data — and each finding records where its date came from.
+Measured before the rule was trusted: on a live check of five news items for a real listed company, four were
+reachable at their own addresses and **all four carried a publish date on the page**. In this batch all 15
+published mentions are publisher-dated, and 1 profile states plainly that the articles it found carried no such
+date. The rule costs almost nothing here and makes the family citable.
 
 ## Correctness, checked by a second path
 
@@ -124,7 +172,6 @@ on which one ran:
 | Filing counts recounted from the bytes this run kept, with a parser written separately from the one that made the claim | 255 |
 | Page findings (websites, profiles, job listings, news mentions, ratings) re-derived from the bytes this run kept | 101 |
 | Register workforce figures compared against the live register API | 44 |
-
 356 of the 400 were therefore re-derived from evidence this run kept rather than from whatever the web happens
 to say today. The audit report publishes these counts itself (`re-derived_from_kept_evidence`,
 `live_source_reasked`), so the split is checkable rather than asserted.
@@ -143,7 +190,7 @@ reported as wrong numbers and every one of them was the verifier being wrong.
 | Metric precision | **1.000** |
 | Qualification under the external-footprint gates | **passed** |
 
-Separately, every rendered profile was read back against the claims it says it came from: 23,935 stated facts
+Separately, every rendered profile was read back against the claims it says it came from: 24,886 stated facts
 across 1,000 profiles, 0 sentences without a claim behind them, 0 facts presented without provenance, and 1,000
 of 1,000 profiles stating what was searched for and not found.
 
@@ -151,27 +198,29 @@ Two defects were caught by that read-back rather than by looking at a page. The 
 two shapes — a purpose as one text with line breaks in its bulk file, and the identical text as a list of lines
 in its API; an employee count as `"14"` in one and `14` in the other. Comparing them exactly said "different",
 so 3,070 profiles carried the same fact twice. Values are now normalised by shape before anything decides
-whether a fact is new; the same batch records 5 such pairs, and every one of those 5 is a wording difference
-between the register's two sources rather than a duplicate. The second defect was a link pattern: `<a…` matches
+whether a fact is new; this batch records 4 such profiles, each one a wording difference between the register's
+two sources rather than a duplicate. The second defect was a link pattern: `<a…` matches
 `<article … href=…>` and `<aside href=…>`, which is how three sites came to be counted as carrying two job
 links when they carried one.
 
 ## Sources move. That is measured too.
 
 Re-checking a claim is not the same as asking the source again. Of the 101 findings re-derived from kept *pages*,
-the live source was then asked a few minutes later: 58 returned identical bytes, **43 had changed, redirected
+the live source was then asked a few minutes later: 59 returned identical bytes, **42 had changed, redirected
 elsewhere, or stopped answering**. (The register-derived findings are not counted there: their check already
 re-reads the live register, and a byte-for-byte comparison against a bulk file is not a measurement of anything.) A claim is stored against the bytes it was made from — URL,
 retrieval time, content hash — so a publisher changing a page is a fact about the web, not a defect in the
 profile.
 
-The same thing shows up between runs, and it is the part most worth stating plainly. A batch replayed against its
-own snapshots reports nothing: 1,000 companies, 1,000 snapshots, 0 changes. Two runs of this batch an hour apart
-reported **2 field-level changes on 2 companies** — storelva1.webnode.no no longer answered, and one site moved
-from a proven website to an unproven one. The pair of runs before that reported 3 changes on 3 companies, all in
-the same family, and the next pair reported 2 — dugnadsportalen.no and damsgaardregnskap.no, which had
-"disappeared" in one comparison, came back. Same agent, same companies: those two sites were simply unreachable
-in one run and present in the next.
+The same thing shows up between runs, and it is the part most worth stating plainly. With this build, a 120-company
+pair run back to back reports **no field-level changes at all**, and pointing `--resume` at the finished
+1,000-company run re-emits all 1,000 profiles — envelopes, findings and the flat profiles — byte-for-byte with no
+request made. Earlier builds measured the other case on the same companies: two runs an hour apart reported **2
+field-level changes on 2 companies** — storelva1.webnode.no no longer answered, and one site moved from a proven
+website to an unproven one. The pair of runs before that reported 3 changes on 3 companies, all in the same family,
+and the next pair reported 2 — dugnadsportalen.no and damsgaardregnskap.no, which had "disappeared" in one
+comparison, came back. Same agent, same companies: those two sites were simply unreachable in one run and present
+in the next.
 
 So an availability change is read here as *what this run could establish*, never as "the company removed its
 website". A live replay of 50 companies 40 minutes after a run reproduced 1 of 3 change sets, and the two it did
@@ -186,10 +235,10 @@ reports its own code as news. Values are now normalised by shape on both sides �
 text in one piece or in parts, `"14"` and `14` — and the same two runs compared under that rule report 2 changes,
 both real.
 
-Run-to-run variation is measured rather than assumed. Four batches of the same 1,000 companies across one day, on
-the builds that were live at the time: **201, 203, 204 and 202** verified websites, and two-platform coverage
-between 205 and 209 companies. A difference of one or two companies at this scale is noise, and nothing in this
-document claims better than that.
+Run-to-run variation is measured rather than assumed. Six runs of the same 1,000 companies across two days — the
+last two with this exact code, the earlier four on the builds live at the time: **201, 203, 204, 202, 201 and 202**
+verified websites. A difference of one or two companies at this scale is noise, and nothing in this document claims
+better than that.
 
 ## What it costs
 
@@ -198,13 +247,14 @@ shipped code an hour apart. The work is the same every time; the waiting is not:
 
 | | first measurement | second measurement |
 |---|---|---|
-| wall clock | 2,374 s | 2,459 s |
-| per company, median | 8.9 s | 9.4 s |
-| per company, 95th percentile | 44.4 s | 44.6 s |
-| HTTP requests | 10,177 | 10,193 |
-| served from the run's own cache | 77 | 76 |
-| avoided because the host was already unreachable | 160 | 157 |
-| evidence pages written | 6,261 (121 MB) | 6,768 (123 MB) |
+| wall clock | 2,371 s | 2,356 s |
+| per company, median | 9.3 s | 9.1 s |
+| per company, 95th percentile | 44.2 s | 44.5 s |
+| HTTP requests | 10,205 | 10,184 |
+| served from the run's own cache | 75 | 76 |
+| avoided because the host was already unreachable | 158 | 159 |
+| evidence pages written | 6,769 (126 MB) | 6,768 (125 MB) |
+| source calls that failed outright | 3 | 3 |
 | cost to third parties | **$0.00** | **$0.00** |
 
 A build from earlier the same day measured 3,278 s with 10,192 requests. Request counts vary by 0.1%; wall clock
@@ -236,7 +286,7 @@ byte-for-byte — envelopes, profiles and findings identical — in 1.6 seconds,
 
 These are properties of the population, not settings to tune.
 
-- **Websites.** The register lists a website for 10.9% of the eligible universe. This agent reaches 20.2%, about
+- **Websites.** The register lists a website for 10.9% of the eligible universe. This agent reaches 20.0%, about
   double, by deriving candidate domains from the company's own name and its registered e-mail domain and then
   proving each candidate against the page. The remaining four fifths of small entities appear to have no website
   at all. Third-party search was measured on 30 companies whose site the free path could not find: a commercial
@@ -250,11 +300,11 @@ These are properties of the population, not settings to tune.
 - **Hiring.** 27 companies in 1,000 carry two or more job links on their own site. A national vacancy feed was
   tested against this batch and matched none of them, because the listings most Norwegian employers use are
   excluded from its interface.
-- **Dated activity.** Measured before writing any extractor: of the 202 company-site pages this run kept, **4
-  companies** publish machine-readable activity dates (`<time datetime=…>` or `itemprop=datePublished`). Fourteen
-  pages carry dates as printed text, which is a different thing — a `dd.mm.yyyy` on a page can be a copyright
-  year or a contract date. A family reachable for 0.4% of the batch does not justify its own failure modes, so
-  no activity-date claim is published.
+- **Dated activity.** Measured before writing any extractor, and measured again on this build: of the 214 distinct
+  company-site pages this run kept, **5 carry a `<time datetime=…>` and 1 an `itemprop=datePublished`, covering 4
+  companies**. Fourteen more pages carry dates as printed text, which is a different thing — a `dd.mm.yyyy` on a
+  page can be a copyright year or a contract date. A family reachable for 0.4% of the batch does not justify its
+  own failure modes, so no activity-date claim is published.
 - **Sentiment.** Not attempted. A defensible sentiment claim needs several hundred independently labelled
   Norwegian company texts; nothing with usable rights was available, so no sentiment label is published.
 - **Time.** This is a current-state agent. Each run is a snapshot; a later run reports the fields that actually

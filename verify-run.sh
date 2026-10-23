@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Verify a finished run.
 #
-# Four independent checks, in the order that makes them useful: re-derive published findings from
+# Five independent checks, in the order that makes them useful: re-derive published findings from
 # different code paths, run the competition's own evaluator over them, check the rights and rate policy of
-# every finding, and read every rendered profile back against the claims it says it came from.
+# every finding, and read every rendered profile back against the claims it says it came from. The fifth step
+# counts what the reviewer's own three rules changed in this run.
 #
 # usage: ./verify-run.sh out/run-1 [path to the competition starter kit]
 set -euo pipefail
@@ -18,21 +19,24 @@ if [ ! -f "$RUN/observations.jsonl" ]; then
 fi
 mkdir -p "$OUT"
 
-echo "1/4 independent re-check of published findings"
+echo "1/5 independent re-check of published findings"
 perl -e 'alarm 2400; exec @ARGV' python3 -u audit.py --observations "$RUN/observations.jsonl" --out "$OUT/audit" --limit 400
 
-echo "2/4 the competition's external-footprint evaluator"
+echo "2/5 the competition's external-footprint evaluator"
 perl -e 'alarm 600; exec @ARGV' python3 "$KIT/scripts/evaluate_external_footprint.py" \
   --profiles "$RUN/profiles.jsonl" --observations "$RUN/observations.jsonl" \
   --labels "$OUT/audit/labels.jsonl" --output "$OUT/external-report.json"
 
-echo "3/4 connector rights and rate policy"
+echo "3/5 connector rights and rate policy"
 perl -e 'alarm 300; exec @ARGV' python3 -u connector_report.py \
   --observations "$RUN/observations.jsonl" --run-report "$RUN/run-report.json" \
   --output "$OUT/connector-report.json"
 
-echo "4/4 reading every profile back against its claims"
+echo "4/5 reading every profile back against its claims"
 perl -e 'alarm 900; exec @ARGV' python3 -u check_profile.py --run "$RUN" --output "$OUT/profile-check.json"
+
+echo "5/5 what the reviewer's three rules changed in this run"
+perl -e 'alarm 300; exec @ARGV' python3 -u fix_report.py --run "$RUN" --output "$OUT/fix-report.json"
 
 # The competition's internal scorer reads two fields that its own evaluator does not produce: a connector-policy
 # flag and a freshness coverage figure. Both are computed here from the run's own records, and the freshness
@@ -74,7 +78,7 @@ PY
 
 echo
 echo "summaries:"
-for name in audit external-report connector-report profile-check; do
+for name in audit external-report connector-report profile-check fix-report; do
   printf '  %s\n' "$OUT/$name.json"
 done
 echo

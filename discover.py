@@ -267,6 +267,48 @@ def domain_derived_from_name(legal_name: str, host: str) -> str:
     return ""
 
 
+def _brand_tokens(name: str) -> set[str]:
+    """Distinctive words of a registered name, in the ASCII spellings a domain would use."""
+    out: set[str] = set()
+    for token in name_tokens(name):
+        if len(token) < 3:
+            continue
+        out.add(token)
+        for table in TRANSLIT:
+            out.add("".join(table.get(ch, ch) for ch in token))
+    return out
+
+
+def domain_owned_by(host: str, name: str) -> bool:
+    """Does this domain's own label start with a distinctive word of this name?
+
+    Deliberately looser than domain_derived_from_name. That one is a proof used to publish a website claim;
+    this one is a warning used to withhold one, checked against the group relation the register itself names.
+    A false warning costs a profile one honest 'unknown' line. A missed one publishes a parent group's page as
+    its subsidiary's own website — which is what the auditor found on 2026-10-22.
+
+    Prefix matching, not substring: brand domains are the brand plus an optional suffix (a2g.no,
+    a2ggruppen.no), and a word buried inside an unrelated label is not the same claim.
+    """
+    if not host or not name:
+        return False
+    sld = registrable_domain(host).split(".")[0]
+    if len(sld) < 3:
+        return False
+    return any(sld.startswith(token) for token in _brand_tokens(name))
+
+
+def group_domain_owner(hosts: list[str], parent_names: list[str]) -> dict:
+    """Say which registered group relation a domain is spelled from, when it is theirs and not this company's."""
+    for host in hosts:
+        if not host:
+            continue
+        for name in parent_names or ():
+            if domain_owned_by(host, name):
+                return {"name": name, "host": host}
+    return {}
+
+
 def name_match(name: str, body: str) -> tuple[bool, str]:
     tokens = name_tokens(name)
     lowered = body.lower()
@@ -508,6 +550,14 @@ if __name__ == "__main__":
     same_text_other_domain = identity_proof("999999999", "TEAM TUR AS", "Team Tur offers guided trips in the mountains.", {"kommune": "OSLO"}, "someothersite.no")
     assert same_text_other_domain["level"] == 3 and not same_text_other_domain["publishable"], same_text_other_domain
     assert normalise_host("https://www.kitron.com/solutions") == "kitron.com"
+    # A group's domain is not its subsidiary's website — the auditor's question of 2026-10-22.
+    assert domain_owned_by("a2g.no", "A2G GRUPPEN AS"), "a parent's own domain must be recognised"
+    assert domain_owned_by("a2ggruppen.no", "A2G GRUPPEN AS"), "a brand with a suffix is the same brand"
+    assert not domain_owned_by("bjorkhaug.no", "A2G GRUPPEN AS"), "an unrelated domain is nobody's"
+    assert not domain_owned_by("noastronomi.no", "A2G GRUPPEN AS"), "a word inside a longer label is not a prefix match"
+    assert domain_owned_by("torbjornpedersen.no", "TORBJØRN PEDERSEN AS"), "transliteration must work here too"
+    owner = group_domain_owner(["bjorkhaug.no", "a2g.no"], ["A2G GRUPPEN AS"])
+    assert owner.get("name") == "A2G GRUPPEN AS" and owner.get("host") == "a2g.no", owner
     # Mention proof is stricter than page proof: a bare brand mention in third-party text is not enough.
     article = "Kitron delivered strong results this quarter."
     m1 = mention_identity_proof("976605713", "KITRON ASA", article)
